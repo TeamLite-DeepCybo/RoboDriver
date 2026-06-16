@@ -111,19 +111,33 @@ The mock node publishes arm/gripper messages and can mirror one compressed camer
 
 ```bash
 export DEEPCYBO_LITE_DATA_ROOT=/media/stvli/0EE4-E658
-export ROBODRIVER_HOME=/media/stvli/0EE4-E658
 python -m robodriver.scripts.run --robot.type=deepcybo-lite-aio-ros2
 ```
 
 Expect a log like: all cameras ready + `leader_arms` / `follower_arms` 16-D vectors.
 
-### 3. Collect (optional)
+`deepcybo-lite-aio-ros2` automatically mounts the RoboDriver ROS2 collection bridge. It subscribes to `/to_robodriver/start_collect`, `/to_robodriver/finish_collect`, and `/to_robodriver/affirm_to_collect`. The ROS2 FSM data root defaults to `/media/stvli/0EE4-E658/` and can be overridden with `DEEPCYBO_LITE_DATA_ROOT`. RoboDriver-Server is optional for urgent terminal-driven collection; if the server is online, HMI and stream updates continue to work.
+
+### 3. Collect with the ROS2 FSM
+
+Short-term field collection is driven by the `bar_ws` terminal FSM:
+
+```bash
+cd /home/stvli/Desktop/bar_ws
+src/bar_ros2/ops/lite/scripts/bilateral_fsm_ready.sh
+```
+
+- Enter teleop: publishes `start_collect=true`; RoboDriver starts recording.
+- Finish segment: publishes `finish_collect=true`; RoboDriver stops and saves a pending episode.
+- Affirmation: `Y/y` keeps the pending episode; `N/n` deletes it.
+
+### 4. Collect with Server + HMI (optional)
 
 Start RoboDriver-Server + nginx, open `http://localhost:5805/hmi/`.
-Lite script default data root: `/media/stvli/0EE4-E658/`.
+ROS2 FSM data root: `$DEEPCYBO_LITE_DATA_ROOT/`; in the product environment this resolves to `/media/stvli/0EE4-E658/`.
 HMI / Server data root: `$ROBODRIVER_HOME/dataset/`; in the product environment this resolves to `/media/stvli/0EE4-E658/dataset/`.
 
-### 4. Playback
+### 5. Playback
 
 Use the HMI playback button or `robot.send_action()` → `node.ros_replay()` publishes a 16-D `MITCommand` and fills zero velocity / effort plus default stiffness / damping.
 

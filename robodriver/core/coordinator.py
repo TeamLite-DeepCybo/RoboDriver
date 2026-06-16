@@ -1,8 +1,12 @@
 import asyncio
+import os
 import queue
+import shutil
 import threading
 import time
 from datetime import datetime
+from enum import Enum
+from pathlib import Path
 from typing import Dict, Optional
 
 import aiohttp
@@ -28,6 +32,15 @@ from robodriver.utils.utils import cameras_to_stream_json, get_current_git_branc
 logger = logging_mp.get_logger(__name__)
 
 
+class CollectionState(str, Enum):
+    IDLE = "IDLE"
+    COLLECTING = "COLLECTING"
+    WAITING_AFFIRM = "WAITING_AFFIRM"
+    SAVING = "SAVING"
+    DISCARDING = "DISCARDING"
+    ERROR = "ERROR"
+
+
 class Coordinator:
     def __init__(
         self,
@@ -46,6 +59,7 @@ class Coordinator:
         self.teleop = teleop
 
         self.running = False
+        self.server_available = False
         self.last_heartbeat_time = 0
         self.heartbeat_interval = 2
         self.recording = False
@@ -61,18 +75,32 @@ class Coordinator:
         self.sio.on("robot_command", self.__on_robot_command_handle)
 
         self.record = None
+        self.collection_state = CollectionState.IDLE
+        self.pending_episode_index = None
+        self.pending_save_data = None
+        self.pending_record_cmd = None
+        self.last_collection_state_change_time = time.time()
+        self.ros2_collection_sequence = 0
+        self._collection_lock = asyncio.Lock()
 
     ####################### Client Start/Stop ############################
     async def start(self):
         """启动客户端"""
         self.running = True
-        await self.sio.connect(self.server_url)
+        try:
+            await self.sio.connect(self.server_url)
+        except Exception:
+            self.running = False
+            self.server_available = False
+            raise
+        self.server_available = True
         # 用 asyncio 任务发心跳
         asyncio.create_task(self.send_heartbeat_loop())
 
     async def stop(self):
         self.running = False
-        await self.sio.disconnect()
+        if self.sio.connected:
+            await self.sio.disconnect()
         await self.session.close()
         logger.info("异步客户端已停止")
 
@@ -83,11 +111,301 @@ class Coordinator:
 
     async def __on_connect_handle(self):
         """连接成功回调"""
+        self.server_available = True
         logger.info("成功连接到服务器")
 
     async def __on_disconnect_handle(self):
         """断开连接回调"""
+        self.server_available = False
         logger.info("与服务器断开连接")
+
+    ####################### ROS2 Collection API ############################
+    def _set_collection_state(self, state: CollectionState):
+        if self.collection_state != state:
+            logger.info(
+                f"Collection state: {self.collection_state.value} -> {state.value}"
+            )
+        self.collection_state = state
+        self.last_collection_state_change_time = time.time()
+
+    def _collection_result(self, msg: str, data: Optional[dict] = None) -> dict:
+        result = {
+            "msg": msg,
+            "state": self.collection_state.value,
+        }
+        if data is not None:
+            result["data"] = data
+        return result
+
+    def _get_lite_collection_root(self) -> Path:
+        env_root = os.getenv("DEEPCYBO_LITE_DATA_ROOT")
+        if env_root:
+            return Path(env_root).expanduser()
+
+        try:
+            from robodriver_robot_deepcybo_lite_aio_ros2.config import (
+                DEFAULT_DATA_ROOT,
+            )
+
+            return Path(DEFAULT_DATA_ROOT).expanduser()
+        except Exception:
+            return DOROBOT_DATASET
+
+    def _prepare_lite_collection_root(self, root: Path) -> bool:
+        root = root.expanduser()
+        if str(root).startswith("/media/") and not root.exists():
+            logger.error(
+                f"Lite collection root does not exist, refusing to create mount path: {root}"
+            )
+            return False
+
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            total, used, free = shutil.disk_usage(root)
+        except Exception as e:
+            logger.error(f"Cannot access Lite collection root {root}: {e}")
+            return False
+
+        free_gb = free // (2**30)
+        if free_gb < 2:
+            logger.warning(
+                f"Lite collection root free space is below 2GB: {root}, free={free_gb}GB"
+            )
+            return False
+        return True
+
+    def _build_lite_ros2_record_cmd(self) -> dict:
+        self.ros2_collection_sequence += 1
+        now = datetime.now()
+        stamp = now.strftime("%Y%m%d_%H%M%S")
+        task_name = os.getenv("DEEPCYBO_LITE_TASK_NAME", "deepcybo_lite_bilateral")
+        task_id = os.getenv("DEEPCYBO_LITE_TASK_ID", now.strftime("%Y%m%d"))
+        task_data_prefix = os.getenv("DEEPCYBO_LITE_TASK_DATA_PREFIX", "ros2")
+        task_data_id = (
+            f"{task_data_prefix}_{stamp}_{self.ros2_collection_sequence:04d}"
+        )
+        machine_id = os.getenv(
+            "DEEPCYBO_LITE_MACHINE_ID",
+            getattr(self.daemon.robot, "name", "deepcybo-lite-aio-ros2"),
+        )
+
+        return {
+            "task_id": str(task_id),
+            "task_name": str(task_name),
+            "task_data_id": str(task_data_id),
+            "machine_id": str(machine_id),
+            "collector_id": os.getenv("DEEPCYBO_LITE_COLLECTOR_ID", "ros2_fsm"),
+            "source": "ros2_fsm",
+            "countdown_seconds": 0,
+            "created_at": now.isoformat(timespec="seconds"),
+        }
+
+    def _build_collection_target_dir(self, dataset_path: Path, msg: dict) -> Path:
+        task_id = msg.get("task_id")
+        task_name = msg.get("task_name")
+        task_data_id = msg.get("task_data_id")
+        task_dir = f"{task_name}_{task_id}"
+        repo_id = f"{task_name}_{task_id}_{task_data_id}"
+        date_str = datetime.now().strftime("%Y%m%d")
+        return dataset_path / date_str / "user" / task_dir / repo_id
+
+    def _ensure_unique_ros2_record_dir(
+        self, dataset_path: Path, msg: dict
+    ) -> tuple[str, Path]:
+        base_task_data_id = msg["task_data_id"]
+        target_dir = self._build_collection_target_dir(dataset_path, msg)
+        collision_count = 0
+        while target_dir.exists():
+            collision_count += 1
+            msg["task_data_id"] = f"{base_task_data_id}_retry{collision_count:02d}"
+            target_dir = self._build_collection_target_dir(dataset_path, msg)
+
+        repo_id = (
+            f"{msg.get('task_name')}_{msg.get('task_id')}_{msg.get('task_data_id')}"
+        )
+        return repo_id, target_dir
+
+    async def _wait_for_daemon_record_frame(self) -> bool:
+        timeout_s = float(os.getenv("DEEPCYBO_LITE_RECORD_READY_TIMEOUT", "15"))
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if (
+                self.daemon.get_observation() is not None
+                and self.daemon.get_obs_action() is not None
+            ):
+                return True
+            await asyncio.sleep(0.05)
+        logger.error(
+            "Timed out waiting for daemon observation/action before ROS2 collection."
+        )
+        return False
+
+    async def handle_ros2_start_collect(self, value: bool) -> dict:
+        if not value:
+            logger.info("ROS2 start_collect=false received, latch cleared.")
+            return self._collection_result("ignored_false")
+        return await self.start_collection_from_ros2()
+
+    async def handle_ros2_finish_collect(self, value: bool) -> dict:
+        if not value:
+            logger.info("ROS2 finish_collect=false received, latch cleared.")
+            return self._collection_result("ignored_false")
+        return await self.finish_collection_from_ros2()
+
+    async def handle_ros2_affirm_to_collect(self, value: bool) -> dict:
+        return await self.affirm_collection_from_ros2(keep=value)
+
+    async def start_collection_from_ros2(self) -> dict:
+        async with self._collection_lock:
+            logger.info("处理 ROS2 开始采集命令...")
+            if self.replaying:
+                logger.warning("Replay is running, cannot start ROS2 collection.")
+                return self._collection_result("replay_in_progress")
+
+            if self.collection_state == CollectionState.COLLECTING:
+                logger.info("ROS2 collection is already active, ignoring duplicate start.")
+                return self._collection_result("already_collecting")
+
+            if self.collection_state == CollectionState.WAITING_AFFIRM:
+                logger.warning("Pending episode needs affirmation before next start.")
+                return self._collection_result("pending_affirmation")
+
+            if self.recording:
+                logger.warning(
+                    "A collection is already active outside ROS2, refusing ROS2 start."
+                )
+                return self._collection_result("recording_in_progress")
+
+            dataset_path = self._get_lite_collection_root()
+            if not self._prepare_lite_collection_root(dataset_path):
+                return self._collection_result("storage_unavailable")
+
+            if not await self._wait_for_daemon_record_frame():
+                return self._collection_result("daemon_not_ready")
+
+            msg = self._build_lite_ros2_record_cmd()
+            repo_id, target_dir = self._ensure_unique_ros2_record_dir(
+                dataset_path, msg
+            )
+            task_name = msg.get("task_name")
+            record_cfg = RecordConfig(
+                fps=DEFAULT_FPS,
+                single_task=task_name,
+                repo_id=repo_id,
+                video=self.daemon.robot.use_videos,
+                resume=False,
+                root=target_dir,
+            )
+            self.record = Record(
+                fps=DEFAULT_FPS,
+                robot=self.daemon.robot,
+                daemon=self.daemon,
+                teleop=self.teleop,
+                record_cfg=record_cfg,
+                record_cmd=msg,
+            )
+            self.recording = True
+            self.pending_episode_index = None
+            self.pending_save_data = None
+            self.pending_record_cmd = None
+            self._set_collection_state(CollectionState.COLLECTING)
+            self.record.start()
+
+            logger.info(f"ROS2 collection started: repo_id={repo_id}, root={target_dir}")
+            return self._collection_result(
+                "success",
+                {
+                    "record_cmd": msg,
+                    "repo_id": repo_id,
+                    "root": str(target_dir),
+                },
+            )
+
+    async def finish_collection_from_ros2(self) -> dict:
+        async with self._collection_lock:
+            logger.info("处理 ROS2 完成采集命令...")
+            if self.replaying:
+                logger.warning("Replay is running, cannot finish ROS2 collection.")
+                return self._collection_result("replay_in_progress")
+
+            if self.collection_state == CollectionState.IDLE and not self.recording:
+                logger.info("No active ROS2 collection, ignoring stale finish.")
+                return self._collection_result("no_active_recording")
+
+            if self.collection_state == CollectionState.WAITING_AFFIRM:
+                logger.info("ROS2 collection already saved, ignoring duplicate finish.")
+                return self._collection_result("already_waiting_affirmation")
+
+            if self.record is None:
+                logger.error("ROS2 finish requested but no Record exists.")
+                self.recording = False
+                self._set_collection_state(CollectionState.ERROR)
+                return self._collection_result("missing_record")
+
+            self.saveing = True
+            self._set_collection_state(CollectionState.SAVING)
+            try:
+                self.record.stop()
+                save_data = await asyncio.to_thread(self.record.save)
+                if save_data is None:
+                    save_data = self.record.save_data
+
+                self.recording = False
+                self.pending_episode_index = self.record.last_record_episode_index
+                self.pending_save_data = save_data
+                self.pending_record_cmd = self.record.record_cmd
+                self._set_collection_state(CollectionState.WAITING_AFFIRM)
+
+                logger.info(
+                    f"ROS2 collection saved and waiting affirmation: episode={self.pending_episode_index}"
+                )
+                return self._collection_result("success", save_data)
+            except Exception as e:
+                logger.exception(f"Failed to finish ROS2 collection: {e}")
+                self.recording = False
+                self._set_collection_state(CollectionState.ERROR)
+                return self._collection_result("save_failed", {"error": str(e)})
+            finally:
+                self.saveing = False
+
+    async def affirm_collection_from_ros2(self, keep: bool) -> dict:
+        async with self._collection_lock:
+            logger.info(f"处理 ROS2 采集确认命令: keep={keep}")
+            if self.collection_state != CollectionState.WAITING_AFFIRM:
+                logger.info("No pending ROS2 collection, ignoring stale affirmation.")
+                return self._collection_result("no_pending_recording")
+
+            if self.record is None:
+                logger.error("ROS2 affirmation requested but no Record exists.")
+                self._set_collection_state(CollectionState.ERROR)
+                return self._collection_result("missing_record")
+
+            data = self.pending_save_data
+            if keep:
+                logger.info(
+                    f"ROS2 collection kept: episode={self.pending_episode_index}"
+                )
+                self.pending_episode_index = None
+                self.pending_save_data = None
+                self.pending_record_cmd = None
+                self.record = None
+                self._set_collection_state(CollectionState.IDLE)
+                return self._collection_result("success", data)
+
+            self._set_collection_state(CollectionState.DISCARDING)
+            try:
+                self.record.discard()
+                logger.info("ROS2 collection discarded.")
+                self.pending_episode_index = None
+                self.pending_save_data = None
+                self.pending_record_cmd = None
+                self.record = None
+                self._set_collection_state(CollectionState.IDLE)
+                return self._collection_result("discarded", data)
+            except Exception as e:
+                logger.exception(f"Failed to discard ROS2 collection: {e}")
+                self._set_collection_state(CollectionState.ERROR)
+                return self._collection_result("discard_failed", {"error": str(e)})
 
     async def __on_robot_command_handle(self, data):
         """收到机器人命令回调"""
@@ -418,6 +736,9 @@ class Coordinator:
         return sum(self.cameras.values())
 
     async def update_stream_info_to_server(self):
+        if not self.server_available:
+            logger.debug("Server is unavailable, skip stream info update.")
+            return
         stream_info_data = cameras_to_stream_json(self.cameras)
         logger.info(f"stream_info_data: {stream_info_data}")
         try:
@@ -435,6 +756,8 @@ class Coordinator:
             logger.error(f"同步流信息异常: {e}")
 
     async def update_stream_async(self, name, frame):
+        if not self.server_available:
+            return
         _, jpeg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         url = f"{self.server_url}/robot/update_stream/{self.cameras[name]}"
         try:

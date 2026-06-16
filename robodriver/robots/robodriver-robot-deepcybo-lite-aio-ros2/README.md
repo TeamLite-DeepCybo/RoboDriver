@@ -121,14 +121,28 @@ source /opt/ros/jazzy/setup.bash
 conda activate robodriver   # 或你的 venv
 cd /path/to/RoboDriver
 export DEEPCYBO_LITE_DATA_ROOT=/media/stvli/0EE4-E658
-export ROBODRIVER_HOME=/media/stvli/0EE4-E658
 
 python -m robodriver.scripts.run --robot.type=deepcybo-lite-aio-ros2
 ```
 
 连接成功日志示例：`[连接成功] 所有设备已就绪`（3 相机 + leader/follower 各 16 维）。
 
-### 3. 采集（可选 Server + HMI）
+`deepcybo-lite-aio-ros2` 会自动挂载 RoboDriver ROS2 采集桥，订阅 `/to_robodriver/start_collect`、`/to_robodriver/finish_collect`、`/to_robodriver/affirm_to_collect`。默认 ROS2 FSM 落盘根目录为 `/media/stvli/0EE4-E658/`，可用 `DEEPCYBO_LITE_DATA_ROOT` 覆盖。紧急采集阶段可不启动 RoboDriver-Server；若 Server 在线，HMI/视频流能力仍可继续使用。
+
+### 3. 采集（ROS2 FSM）
+
+短期现场采集由 `bar_ws` 终端 FSM 统一控制：
+
+```bash
+cd /home/stvli/Desktop/bar_ws
+src/bar_ros2/ops/lite/scripts/bilateral_fsm_ready.sh
+```
+
+- 进入遥操：发布 `start_collect=true`，RoboDriver 开始录制。
+- 结束本段：发布 `finish_collect=true`，RoboDriver 停止并保存为 pending episode。
+- 人工确认：`Y/y` 保留 pending episode，`N/n` 删除 pending episode。
+
+### 4. 采集（可选 Server + HMI）
 
 ```bash
 sudo systemctl start nginx
@@ -136,10 +150,10 @@ sudo systemctl start nginx
 ```
 
 - 任务平台 / HMI：`http://localhost:5805/hmi/`
-- Lite 脚本默认落盘根目录：`/media/stvli/0EE4-E658/`
+- ROS2 FSM 数据目录：`$DEEPCYBO_LITE_DATA_ROOT/`；本产品环境设为 `/media/stvli/0EE4-E658/`
 - HMI / Server 数据目录：`$ROBODRIVER_HOME/dataset/`；本产品环境设为 `/media/stvli/0EE4-E658/dataset/`
 
-### 4. 回放
+### 5. 回放
 
 采集平台点击「回放」，或调用 `robot.send_action()`（内部 `node.ros_replay` 向 `/slave/remote_policy_controller/command` 发布 16 维 `MITCommand`，并补齐 velocity/effort/stiffness/damping）。
 
