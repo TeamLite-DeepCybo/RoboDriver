@@ -87,7 +87,7 @@ class DeepcyboLiteAioRos2RobotStatus(RobotStatus):
     device_body: str = "DeepCybo"
 
     def __post_init__(self):
-        self.specifications.end_type = "双臂 14 关节"
+        self.specifications.end_type = "双臂 14 关节 + 2 夹爪"
         self.specifications.fps = 30
         self.specifications.camera = CameraStatus(
             information=[
@@ -122,7 +122,7 @@ class DeepcyboLiteAioRos2RobotStatus(RobotStatus):
             information=[
                 ArmInfo(
                     name=_ARM_LEADER,
-                    type="双臂 14 关节（action / MITCommand 目标）",
+                    type="双臂 14 关节 + 2 夹爪（action / MITCommand 目标）",
                     start_pose=[],
                     joint_p_limit=[],
                     joint_n_limit=[],
@@ -130,7 +130,7 @@ class DeepcyboLiteAioRos2RobotStatus(RobotStatus):
                 ),
                 ArmInfo(
                     name=_ARM_FOLLOWER,
-                    type="双臂 14 关节（observation / JointState 反馈）",
+                    type="双臂 14 关节 + 2 夹爪（observation / JointState 反馈）",
                     start_pose=[],
                     joint_p_limit=[],
                     joint_n_limit=[],

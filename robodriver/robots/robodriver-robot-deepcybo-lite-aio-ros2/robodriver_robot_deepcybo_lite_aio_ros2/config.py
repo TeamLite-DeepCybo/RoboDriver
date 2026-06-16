@@ -1,7 +1,7 @@
 """DeepCybo Lite 双臂机器人 — RoboDriver 配置与 ROS2 话题约定。
 
-向量顺序（leader / follower 须与 bar_bringup_lite/config/lite_hardware.yaml 一致）：
-  左臂 7 关节 -> 右臂 7 关节（共 14 维）
+向量顺序：
+  左臂 7 关节 -> 右臂 7 关节 -> 左夹爪 -> 右夹爪（共 16 维）
 """
 
 from dataclasses import dataclass, field
@@ -49,15 +49,21 @@ ARM_JOINT_NAMES: tuple[str, ...] = (
     "right_wrist_pitch",
 )
 
+GRIPPER_JOINT_NAMES: tuple[str, ...] = (
+    "left_gripper",
+    "right_gripper",
+)
 
-def _build_arm_motor_block(
+LITE_JOINT_NAMES: tuple[str, ...] = ARM_JOINT_NAMES + GRIPPER_JOINT_NAMES
+
+def _build_lite_motor_block(
     norm_mode_body: MotorNormMode,
     *,
     start_id: int,
 ) -> Dict[str, Motor]:
-    """返回有序 dict（插入顺序 = 向量下标 = Lite arm_joints 顺序）。"""
+    """返回有序 dict（插入顺序 = 向量下标 = Lite 16 维顺序）。"""
     motors: Dict[str, Motor] = {}
-    for offset, name in enumerate(ARM_JOINT_NAMES):
+    for offset, name in enumerate(LITE_JOINT_NAMES):
         motors[name] = Motor(start_id + offset, "deepcybo_joint", norm_mode_body)
     return motors
 
@@ -75,13 +81,13 @@ class DeepcyboLiteAioRos2RobotConfig(RobotConfig):
     # 与 galaxealite 一致：外层 key 须与 node.recv_leader / recv_follower 的组件名一致
     leader_motors: Dict[str, Dict[str, Motor]] = field(
         default_factory=lambda norm_mode_body=norm_mode_body: {
-            "leader_arms": _build_arm_motor_block(norm_mode_body, start_id=1),
+            "leader_arms": _build_lite_motor_block(norm_mode_body, start_id=1),
         }
     )
 
     follower_motors: Dict[str, Dict[str, Motor]] = field(
         default_factory=lambda norm_mode_body=norm_mode_body: {
-            "follower_arms": _build_arm_motor_block(norm_mode_body, start_id=1),
+            "follower_arms": _build_lite_motor_block(norm_mode_body, start_id=1),
         }
     )
 
