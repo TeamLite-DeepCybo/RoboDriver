@@ -1,5 +1,4 @@
 import asyncio
-import os
 import queue
 import shutil
 import threading
@@ -17,6 +16,12 @@ from lerobot.teleoperators import Teleoperator
 
 from robodriver.core.recorder import Record, RecordConfig
 from robodriver.core.replayer import DatasetReplayConfig, ReplayConfig, replay
+from robodriver.core.ros2_collection_metadata import (
+    build_lite_ros2_record_cmd,
+    ensure_unique_ros2_record_dir,
+    get_lite_record_ready_timeout,
+    resolve_lite_collection_root,
+)
 from robodriver.dataset.dorobot_dataset import *
 from robodriver.dataset.visual.visual_dataset import visualize_dataset
 from robodriver.robots.daemon import Daemon
@@ -138,18 +143,14 @@ class Coordinator:
         return result
 
     def _get_lite_collection_root(self) -> Path:
-        env_root = os.getenv("DEEPCYBO_LITE_DATA_ROOT")
-        if env_root:
-            return Path(env_root).expanduser()
-
         try:
             from robodriver_robot_deepcybo_lite_aio_ros2.config import (
                 DEFAULT_DATA_ROOT,
             )
-
-            return Path(DEFAULT_DATA_ROOT).expanduser()
         except Exception:
-            return DOROBOT_DATASET
+            DEFAULT_DATA_ROOT = DOROBOT_DATASET
+
+        return resolve_lite_collection_root(DEFAULT_DATA_ROOT)
 
     def _prepare_lite_collection_root(self, root: Path) -> bool:
         root = root.expanduser()
@@ -176,57 +177,22 @@ class Coordinator:
 
     def _build_lite_ros2_record_cmd(self) -> dict:
         self.ros2_collection_sequence += 1
-        now = datetime.now()
-        stamp = now.strftime("%Y%m%d_%H%M%S")
-        task_name = os.getenv("DEEPCYBO_LITE_TASK_NAME", "deepcybo_lite_bilateral")
-        task_id = os.getenv("DEEPCYBO_LITE_TASK_ID", now.strftime("%Y%m%d"))
-        task_data_prefix = os.getenv("DEEPCYBO_LITE_TASK_DATA_PREFIX", "ros2")
-        task_data_id = (
-            f"{task_data_prefix}_{stamp}_{self.ros2_collection_sequence:04d}"
+        return build_lite_ros2_record_cmd(
+            sequence=self.ros2_collection_sequence,
+            robot_name=getattr(self.daemon.robot, "name", "deepcybo-lite-aio-ros2"),
         )
-        machine_id = os.getenv(
-            "DEEPCYBO_LITE_MACHINE_ID",
-            getattr(self.daemon.robot, "name", "deepcybo-lite-aio-ros2"),
-        )
-
-        return {
-            "task_id": str(task_id),
-            "task_name": str(task_name),
-            "task_data_id": str(task_data_id),
-            "machine_id": str(machine_id),
-            "collector_id": os.getenv("DEEPCYBO_LITE_COLLECTOR_ID", "ros2_fsm"),
-            "source": "ros2_fsm",
-            "countdown_seconds": 0,
-            "created_at": now.isoformat(timespec="seconds"),
-        }
-
-    def _build_collection_target_dir(self, dataset_path: Path, msg: dict) -> Path:
-        task_id = msg.get("task_id")
-        task_name = msg.get("task_name")
-        task_data_id = msg.get("task_data_id")
-        task_dir = f"{task_name}_{task_id}"
-        repo_id = f"{task_name}_{task_id}_{task_data_id}"
-        date_str = datetime.now().strftime("%Y%m%d")
-        return dataset_path / date_str / "user" / task_dir / repo_id
 
     def _ensure_unique_ros2_record_dir(
         self, dataset_path: Path, msg: dict
     ) -> tuple[str, Path]:
-        base_task_data_id = msg["task_data_id"]
-        target_dir = self._build_collection_target_dir(dataset_path, msg)
-        collision_count = 0
-        while target_dir.exists():
-            collision_count += 1
-            msg["task_data_id"] = f"{base_task_data_id}_retry{collision_count:02d}"
-            target_dir = self._build_collection_target_dir(dataset_path, msg)
-
-        repo_id = (
-            f"{msg.get('task_name')}_{msg.get('task_id')}_{msg.get('task_data_id')}"
+        repo_id, target_dir, unique_msg = ensure_unique_ros2_record_dir(
+            dataset_path, msg
         )
+        msg.update(unique_msg)
         return repo_id, target_dir
 
     async def _wait_for_daemon_record_frame(self) -> bool:
-        timeout_s = float(os.getenv("DEEPCYBO_LITE_RECORD_READY_TIMEOUT", "15"))
+        timeout_s = get_lite_record_ready_timeout()
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             if (
