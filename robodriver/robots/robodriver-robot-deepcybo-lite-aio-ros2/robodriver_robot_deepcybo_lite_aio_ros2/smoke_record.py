@@ -37,7 +37,7 @@ from rclpy.executors import MultiThreadedExecutor
 from robodriver.dataset.dorobot_dataset import DoRobotDataset
 from robodriver.robots.utils import busy_wait
 
-from .config import DeepcyboLiteAioRos2RobotConfig
+from .config import DEFAULT_DATA_ROOT, DeepcyboLiteAioRos2RobotConfig
 from .mock_recording import DeepcyboLiteMockRecordingNode
 from .robot import DeepcyboLiteAioRos2Robot
 
@@ -46,7 +46,7 @@ logger = logging_mp.get_logger(__name__)
 
 def _default_output_root() -> Path:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return Path.cwd() / "recordings" / f"deepcybo_lite_smoke_{stamp}"
+    return DEFAULT_DATA_ROOT / f"deepcybo_lite_smoke_{stamp}"
 
 
 def _build_dataset_features(robot: DeepcyboLiteAioRos2Robot, use_videos: bool) -> dict:
@@ -90,7 +90,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--repo-id", default="deepcybo/lite-ros2-smoke")
-    parser.add_argument("--root", type=Path, default=None)
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=None,
+        help=(
+            "Dataset root. Defaults to "
+            f"{DEFAULT_DATA_ROOT}/deepcybo_lite_smoke_<timestamp>."
+        ),
+    )
     parser.add_argument(
         "--task",
         default="DeepCybo Lite ROS2 no-real-robot smoke recording.",

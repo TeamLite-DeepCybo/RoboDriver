@@ -15,8 +15,8 @@ For full topic contracts, vector layout, and the debug fault tree, see [Lite包�
 | pip package | `robodriver_robot_deepcybo_lite_aio_ros2` |
 | RoboDriver type | `deepcybo-lite-aio-ros2` |
 | Stack | ROS2 **Jazzy** (team debug target; use `jazzy` paths instead of `humble`) |
-| Arms | Left/right **7 joints** each, BAR Lite arms mode |
-| State / action vector | **14-D** each, ordered by `lite_hardware.yaml:joints.arm_joints` |
+| Body vector | Dual-arm **14 joints** + dual-gripper **2 values** |
+| State / action vector | **16-D** each: the original 14 arm joints followed by `left_gripper`, `right_gripper` |
 | Cameras | Head + left wrist + right wrist, **640×480**, 30 Hz |
 | Joint / record rate limit | **30 Hz** (aligned with Record loop) |
 
@@ -30,7 +30,7 @@ The `bar_ws` control stack must publish `/slave/lite/joint_states` (`sensor_msgs
 robodriver-robot-deepcybo-lite-aio-ros2/
 ├── robodriver_robot_deepcybo_lite_aio_ros2/
 │   ├── config.py
-│   ├── node.py        # JointState/MITCommand subscribers, 14-D canonical vectors, replay publisher
+│   ├── node.py        # JointState/MITCommand subscribers, 16-D canonical vectors, replay publisher
 │   ├── robot.py
 │   └── status.py
 ├── scripts/
@@ -76,13 +76,13 @@ pip install -e .
 
 | Topic | Type | Requirement |
 |-------|------|-------------|
-| `/slave/lite/joint_states` | `sensor_msgs/JointState` | `name` and `position` must contain the 14 canonical arm joints |
+| `/slave/lite/joint_states` | `sensor_msgs/JointState` | `name` and `position` must contain the 16 canonical Lite joints |
 
 ### Action (command, 30 Hz)
 
 | Topic | Type | Requirement |
 |-------|------|-------------|
-| `/slave/remote_policy_controller/command` | `bar_msgs/MITCommand` | `joint_names` and `position` must contain the same 14 canonical arm joints; replay publishes to this topic |
+| `/slave/remote_policy_controller/command` | `bar_msgs/MITCommand` | `joint_names` and `position` must contain the same 16 canonical Lite joints; replay publishes to this topic |
 
 ### Cameras (30 Hz, `CompressedImage`)
 
@@ -105,24 +105,27 @@ source /opt/ros/jazzy/setup.bash
 bash scripts/ros2_mock_lite_topics.sh
 ```
 
-The mock node publishes arm messages and can mirror one compressed camera stream to the three Lite camera topics. A full `connect()` still requires valid arm data and all three camera streams.
+The mock node publishes arm/gripper messages and can mirror one compressed camera stream to the three Lite camera topics. A full `connect()` still requires valid 16-D Lite data and all three camera streams.
 
 ### 2. Run RoboDriver
 
 ```bash
+export DEEPCYBO_LITE_DATA_ROOT=/media/stvli/0EE4-E658
+export ROBODRIVER_HOME=/media/stvli/0EE4-E658
 python -m robodriver.scripts.run --robot.type=deepcybo-lite-aio-ros2
 ```
 
-Expect a log like: all cameras ready + `leader_arms` / `follower_arms` 14-D vectors.
+Expect a log like: all cameras ready + `leader_arms` / `follower_arms` 16-D vectors.
 
 ### 3. Collect (optional)
 
-Start RoboDriver-Server + nginx, open `http://localhost:5805/hmi/`.  
-Data root: `$ROBODRIVER_HOME/dataset/` (default `~/DoRobot/dataset/`).
+Start RoboDriver-Server + nginx, open `http://localhost:5805/hmi/`.
+Lite script default data root: `/media/stvli/0EE4-E658/`.
+HMI / Server data root: `$ROBODRIVER_HOME/dataset/`; in the product environment this resolves to `/media/stvli/0EE4-E658/dataset/`.
 
 ### 4. Playback
 
-Use the HMI playback button or `robot.send_action()` → `node.ros_replay()` publishes a 14-D `MITCommand` and fills zero velocity / effort plus default stiffness / damping.
+Use the HMI playback button or `robot.send_action()` → `node.ros_replay()` publishes a 16-D `MITCommand` and fills zero velocity / effort plus default stiffness / damping.
 
 ---
 
@@ -130,16 +133,16 @@ Use the HMI playback button or `robot.send_action()` → `node.ros_replay()` pub
 
 | File | Role |
 |------|------|
-| `config.py` | Motor/camera schema; `ARM_JOINT_NAMES`; `DeepcyboLiteRos2Topics`; `control_fps` / `camera_fps` = 30 |
-| `node.py` | Topic subscriptions, 14-D canonical merge; missing joints or invalid dimensions → warning + cache cleared |
+| `config.py` | Motor/camera schema; `LITE_JOINT_NAMES`; `DeepcyboLiteRos2Topics`; `control_fps` / `camera_fps` = 30 |
+| `node.py` | Topic subscriptions, 16-D canonical merge; missing joints or invalid dimensions → warning + cache cleared |
 | `robot.py` | Raises if arm cache invalid when sampling |
 | `status.py` | HMI device status (`leader_arms` / `follower_arms`) |
 
 ---
 
-## TODO / Roadmap
+## Vector Layout
 
-- The next Lite release will add dual-gripper support and expand the state / action vector from the current arms-only **14-D** layout to **16-D**: left arm 7 + left gripper 1 + right arm 7 + right gripper 1. `ARM_JOINT_NAMES`, topic contracts, and the dataset schema should be updated together.
+The current 16-D layout keeps the original 14 arm joints unchanged and appends `left_gripper`, then `right_gripper`.
 
 ---
 

@@ -1,4 +1,5 @@
 from .config import (
+    DEFAULT_DATA_ROOT,
     DeepcyboLiteAioRos2RobotConfig,
     DeepcyboLiteRos2Topics,
     ARM_JOINT_NAMES,

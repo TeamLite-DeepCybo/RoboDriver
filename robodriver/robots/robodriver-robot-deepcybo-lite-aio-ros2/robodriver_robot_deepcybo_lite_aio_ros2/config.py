@@ -4,7 +4,9 @@
   左臂 7 关节 -> 右臂 7 关节 -> 左夹爪 -> 右夹爪（共 16 维）
 """
 
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict
 
 from lerobot.cameras import CameraConfig
@@ -55,6 +57,12 @@ GRIPPER_JOINT_NAMES: tuple[str, ...] = (
 )
 
 LITE_JOINT_NAMES: tuple[str, ...] = ARM_JOINT_NAMES + GRIPPER_JOINT_NAMES
+
+
+DEFAULT_DATA_ROOT = Path(
+    os.getenv("DEEPCYBO_LITE_DATA_ROOT", "/media/stvli/0EE4-E658")
+).expanduser()
+
 
 def _build_lite_motor_block(
     norm_mode_body: MotorNormMode,

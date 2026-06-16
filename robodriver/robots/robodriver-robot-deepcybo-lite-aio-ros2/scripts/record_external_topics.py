@@ -28,6 +28,7 @@ from rclpy.executors import MultiThreadedExecutor
 from robodriver.dataset.dorobot_dataset import DoRobotDataset
 from robodriver.robots.utils import busy_wait
 from robodriver_robot_deepcybo_lite_aio_ros2.config import (
+    DEFAULT_DATA_ROOT,
     DeepcyboLiteAioRos2RobotConfig,
 )
 from robodriver_robot_deepcybo_lite_aio_ros2.robot import DeepcyboLiteAioRos2Robot
@@ -38,7 +39,7 @@ logger = logging_mp.get_logger(__name__)
 
 def _default_output_root() -> Path:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return Path.cwd() / "recordings" / f"deepcybo_lite_external_ros2_{stamp}"
+    return DEFAULT_DATA_ROOT / f"deepcybo_lite_external_ros2_{stamp}"
 
 
 def _build_dataset_features(robot: DeepcyboLiteAioRos2Robot, use_videos: bool) -> dict:
@@ -73,7 +74,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--duration-s", type=float, default=10.0)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--repo-id", default="deepcybo/lite-ros2-external-smoke")
-    parser.add_argument("--root", type=Path, default=None)
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=None,
+        help=(
+            "Dataset root. Defaults to "
+            f"{DEFAULT_DATA_ROOT}/deepcybo_lite_external_ros2_<timestamp>."
+        ),
+    )
     parser.add_argument(
         "--task",
         default="DeepCybo Lite ROS2 external topic recording.",
