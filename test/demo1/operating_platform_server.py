@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 import threading
 import time
 
@@ -244,6 +245,111 @@ def stop_stream(stream_id):
 
     return jsonify({"status": "stopped"})
 
+
+
+# ==== DeepCybo 内网数据管线 API ====
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", "RoboDriver-Server", "x86"))
+import internal_sync as _internal_sync
+
+_internal_syncer = None
+
+def _get_syncer():
+    global _internal_syncer
+    if _internal_syncer is None:
+        config_path = _os.environ.get(
+            "INTERNAL_CONFIG_PATH",
+            _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                          "..", "..", "RoboDriver-Server", "x86", "internal_config.yaml")
+        )
+        _internal_syncer = _internal_sync.InternalSync(config_path)
+    return _internal_syncer
+
+
+@app.route("/api/dataset/sync", methods=["POST"])
+def dataset_sync():
+    """触发数据集内网同步"""
+    data = request.get_json(silent=True) or {}
+
+    source_path = data.get("source_path", "")
+    dataset_name = data.get("dataset_name", "")
+    if not source_path:
+        return jsonify({"error": "缺少 source_path 参数"}), 400
+    if not dataset_name:
+        dataset_name = Path(source_path).name
+
+    sync_images = data.get("sync_images", True)
+    sync_videos = data.get("sync_videos", False)
+
+    try:
+        syncer = _get_syncer()
+        result = syncer.sync_dataset(
+            source_path=source_path,
+            dataset_name=dataset_name,
+            sync_images=sync_images,
+            sync_videos=sync_videos,
+        )
+        return jsonify(result.to_dict())
+    except Exception as e:
+        return jsonify({"error": str(e), "status": "failed"}), 500
+
+
+@app.route("/api/dataset/status", methods=["GET"])
+def dataset_status():
+    """查询同步/转换任务状态"""
+    task_id = request.args.get("task_id", "")
+    if not task_id:
+        return jsonify({"error": "缺少 task_id 参数"}), 400
+
+    status = _internal_sync.InternalSync.get_task_status(task_id)
+    if status is None:
+        return jsonify({"error": f"未找到任务: {task_id}"}), 404
+
+    return jsonify(status)
+
+
+@app.route("/api/dataset/convert", methods=["POST"])
+def dataset_convert():
+    """触发 raw → training-stage 格式转换"""
+    data = request.get_json(silent=True) or {}
+
+    source_path = data.get("source_path", "")
+    output_path = data.get("output_path") or None
+    if not source_path:
+        return jsonify({"error": "缺少 source_path 参数"}), 400
+
+    embed_images = data.get("embed_images", False)
+    overwrite_existing = data.get("overwrite_existing", False)
+
+    try:
+        result = _internal_sync.convert_dataset(
+            source_path=source_path,
+            output_path=output_path,
+            embed_images=embed_images,
+            overwrite_existing=overwrite_existing,
+        )
+        return jsonify(result.to_dict())
+    except Exception as e:
+        return jsonify({"error": str(e), "status": "failed"}), 500
+
+
+@app.route("/api/dataset/connection_test", methods=["GET"])
+def dataset_connection_test():
+    """测试内网目标服务器连接"""
+    try:
+        syncer = _get_syncer()
+        result = syncer.test_connection()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e), "reachable": False}), 500
+
+
+@app.route("/api/dataset/tasks", methods=["GET"])
+def dataset_tasks():
+    """列出所有数据管线任务"""
+    tasks = _internal_sync.InternalSync.list_tasks()
+    return jsonify({"tasks": tasks})
 
 def init_streams():
     """初始化视频流"""
