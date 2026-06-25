@@ -435,9 +435,10 @@ pq_path = next((root / "data").glob("chunk-*/episode_*.parquet"))
 table = pq.read_table(pq_path)
 print("rows:", table.num_rows)
 print("columns:", table.column_names)
+print("image_path template:", info.get("image_path"))
 for key in [k for k, v in info["features"].items() if v["dtype"] == "image"]:
-    cell = table.column(key)[0].as_py()
-    print(key, "bytes:", cell["bytes"], "path:", cell["path"])
+    image_dir = root / "images" / key / "episode_000000"
+    print(key, "in parquet:", key in table.column_names, "jpg count:", len(list(image_dir.glob("frame_*.jpg"))))
 PY
 ```
 
@@ -446,13 +447,26 @@ PY
 ```text
 action shape: [16]
 state shape: [16]
-columns 中包含 observation.images.image_head / image_wrist_left / image_wrist_right
-每个 image cell 中 bytes 为 None，path 指向 images/.../frame_xxxxxx.jpg
+columns 中不包含 observation.images.image_head / image_wrist_left / image_wrist_right
+image_path template = images/{image_key}/episode_{episode_index:06d}/frame_{frame_index:06d}.jpg
+每路 jpg count 与 rows 相等
 ```
 
-注意：图像像素不应写入 parquet。parquet 只保存 Hugging Face `Image` 类型的路径引用，真实 JPEG/PNG 位于数据集根目录的 `images/` 下。VSCode parquet viewer 可能因文件大小限制截断显示；以 `pyarrow` 打印的 `rows` 和 image cell 为准。
+注意：采集端 parquet 不写图像像素，也不写绝对图片路径。它只保存 `frame_index` / `episode_index` 等轻量索引；真实 JPEG/PNG 位于数据集根目录的 `images/` 下，并由 `meta/info.json` 的 `image_path` 模板恢复。训练或 OpenPI 导入前如果需要 Hugging Face `Image` columns，应在 RoboDriver-Server 或离线转换阶段基于模板补齐，避免录制端 parquet 膨胀或绑定本机绝对路径。
 
-### 6.7 停止 RoboDriver
+### 6.7 图像格式结论
+
+本包曾验证过三种写法：
+
+| 写法 | 结果 | 结论 |
+|------|------|------|
+| 在采集端把图片 bytes embed 进 parquet | parquet 急剧膨胀，VSCode parquet viewer 会因大小限制截断显示 | 不采用 |
+| 在采集端写 Hugging Face `Image` 路径列 | 新 parquet 能被 `datasets` 直接读图，但会把录制端和本机绝对路径绑定，也偏离 RoboDriver 采集端轻量格式 | 不作为默认采集格式 |
+| 采集端只写帧索引，图片落在 `images/`，后处理补 image columns | 与原 RoboDriver 功能包分层最一致，也便于 Server/上传/训练管线统一处理 | 当前采用 |
+
+因此，看到采集端 parquet 没有 `observation.images.*` 列不是错误。验收重点是：`meta/info.json` 声明三路 image feature 和 `image_path` 模板；`frame_index` 连续；每路 `images/<image_key>/episode_xxxxxx/frame_xxxxxx.jpg` 数量与 parquet 行数一致。
+
+### 6.8 停止 RoboDriver
 
 录制结束后，在 RoboDriver 终端按 `Ctrl+C`。确认没有残留进程：
 
