@@ -174,29 +174,291 @@ cfg = DeepcyboLiteAioRos2RobotConfig(
 
 ---
 
-## 6. 安装与启动（简要）
+## 6. 真机启动与 ROS2 指令录制
+
+本节是 DeepCybo Lite 真机采集的推荐流程。照着复制即可；不要在真机采集时启动 §8 的 mock / smoke 脚本。
+
+### 6.1 先确认 U 盘和代码分支
+
+RoboDriver 默认把 Lite 数据写到 `/media/stvli/0EE4-E658`。每次重插 U 盘后先检查：
 
 ```bash
-# 1. 安装 RoboDriver 主工程
-cd /path/to/RoboDriver
-pip install -e .
+findmnt /media/stvli/0EE4-E658
+df -h /media/stvli/0EE4-E658
+test -w /media/stvli/0EE4-E658 && echo "U盘可写"
+```
 
-# 2. 安装本 Lite 包
-cd robodriver/robots/robodriver-robot-deepcybo-lite-aio-ros2
-pip install -e .
+正常时应看到 `/dev/sdX1` 挂载到 `/media/stvli/0EE4-E658`，且输出 `U盘可写`。
 
-# 3. 启动 ROS2 中台（发布上文话题）
+PR 合并前建议使用当前开发分支；PR 合并后使用 `main-deepcybo_lite_ros2`：
 
-# 4. 启动 RoboDriver（需 RoboDriver-Server 时另启 HMI）
+```bash
+cd /home/stvli/Desktop/robodriver_ws/src/RoboDriver
+git status --short --branch
+```
+
+### 6.2 准备 RoboDriver 终端环境
+
+新开一个终端，逐行执行：
+
+```bash
+cd /home/stvli/Desktop/robodriver_ws/src/RoboDriver
+
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate robodriver_py312
+
 source /opt/ros/jazzy/setup.bash
+source /home/stvli/Desktop/bar_ws/install/setup.bash
+
 export DEEPCYBO_LITE_DATA_ROOT=/media/stvli/0EE4-E658
 export ROBODRIVER_HOME=/media/stvli/0EE4-E658
+export PYTHONPATH=/home/stvli/Desktop/robodriver_ws/src/RoboDriver:/home/stvli/Desktop/robodriver_ws/src/RoboDriver/robodriver/robots/robodriver-robot-deepcybo-lite-aio-ros2:$PYTHONPATH
+```
+
+验证 Python 加载的是工作区源码：
+
+```bash
+python - <<'PY'
+from pathlib import Path
+import robodriver
+import robodriver.dataset.dorobot_dataset as dorobot_dataset
+
+print(Path(robodriver.__file__).resolve())
+print(Path(dorobot_dataset.__file__).resolve())
+PY
+```
+
+正常输出应指向：
+
+```text
+/home/stvli/Desktop/robodriver_ws/src/RoboDriver/robodriver/...
+```
+
+如果出现 `ModuleNotFoundError`，先补安装：
+
+```bash
+cd /home/stvli/Desktop/robodriver_ws/src/RoboDriver
+pip install -e .
+cd /home/stvli/Desktop/robodriver_ws/src/RoboDriver/robodriver/robots/robodriver-robot-deepcybo-lite-aio-ros2
+pip install -e .
+```
+
+### 6.3 启动前检查 5 路真机话题
+
+同一个终端或另一个已经 source 过 Jazzy 与 `bar_ws` 的终端中执行：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source /home/stvli/Desktop/bar_ws/install/setup.bash
+
+ros2 topic list | grep -E 'slave/lite|remote_policy_controller|deepcybo/lite/camera|to_robodriver'
+```
+
+必须至少看到：
+
+```text
+/slave/lite/joint_states
+/slave/remote_policy_controller/command
+/deepcybo/lite/camera/head/image_raw/compressed
+/deepcybo/lite/camera/wrist_left/image_raw/compressed
+/deepcybo/lite/camera/wrist_right/image_raw/compressed
+/to_robodriver/start_collect
+/to_robodriver/finish_collect
+/to_robodriver/affirm_to_collect
+```
+
+继续检查类型：
+
+```bash
+for t in \
+  /slave/lite/joint_states \
+  /slave/remote_policy_controller/command \
+  /deepcybo/lite/camera/head/image_raw/compressed \
+  /deepcybo/lite/camera/wrist_left/image_raw/compressed \
+  /deepcybo/lite/camera/wrist_right/image_raw/compressed
+do
+  echo "== $t"
+  ros2 topic info "$t"
+done
+```
+
+类型必须分别是：
+
+```text
+/slave/lite/joint_states                         sensor_msgs/msg/JointState
+/slave/remote_policy_controller/command          bar_msgs/msg/MITCommand
+/deepcybo/lite/camera/*/image_raw/compressed     sensor_msgs/msg/CompressedImage
+```
+
+再抽查 16 维关节 / 夹爪名称：
+
+```bash
+ros2 topic echo /slave/lite/joint_states --once
+ros2 topic echo /slave/remote_policy_controller/command --once
+```
+
+`name` / `joint_names` 必须包含第 3 节列出的 16 个 `LITE_JOINT_NAMES`。缺任何一个，RoboDriver 会等待或丢弃该帧。
+
+### 6.4 拉起 RoboDriver 节点
+
+回到 §6.2 准备好的 RoboDriver 终端，执行：
+
+```bash
 python -m robodriver.scripts.run --robot.type=deepcybo-lite-aio-ros2
 ```
 
-Lite 录制脚本默认输出根目录：`/media/stvli/0EE4-E658/`（可用 `DEEPCYBO_LITE_DATA_ROOT` 覆盖）。
+成功时终端会出现类似日志：
 
-HMI / Server 采集路径：`$ROBODRIVER_HOME/dataset/`；本产品环境建议设置 `ROBODRIVER_HOME=/media/stvli/0EE4-E658`，即默认落盘到 `/media/stvli/0EE4-E658/dataset/`。
+```text
+[DeepCybo Lite] node ready
+[连接成功] 所有设备已就绪
+[Lite ROS2 CollectionBridge] ready
+```
+
+如果 20 秒后出现 `连接超时`，不要盲目重启 RoboDriver，按 §10.4 优先检查缺的是相机、leader action，还是 follower observation。
+
+### 6.5 用 ROS2 指令开始 / 结束 / 保存 / 丢弃录制
+
+正式采集一般由前端状态机脚本统一发指令：
+
+```bash
+bash /home/stvli/Desktop/bar_ws/src/bar_ros2/ops/lite/scripts/bilateral_fsm_ready.sh --max-cycles 10
+```
+
+`--max-cycles` 表示本次连续采集的轮数，现场推荐默认值为 **10**。每一轮流程为：进入遥操 → 发布 `start_collect=true` → 人工按 Enter 结束 → 发布 `finish_collect=true` → 操作员输入 `Y/y` 保存或 `N/n` 丢弃。
+
+注意：FSM 屏幕上的“已成功保存采集段数”只在输入 `Y/y` 后增加；输入 `N/n` 的段会被丢弃，不计入成功轨迹数量。
+
+常用写法：
+
+```bash
+# 录 10 轮，推荐现场默认
+bash /home/stvli/Desktop/bar_ws/src/bar_ros2/ops/lite/scripts/bilateral_fsm_ready.sh --max-cycles 10
+
+# 只试跑 1 轮
+bash /home/stvli/Desktop/bar_ws/src/bar_ros2/ops/lite/scripts/bilateral_fsm_ready.sh --max-cycles 1
+
+# 一直循环，直到 Ctrl+C
+bash /home/stvli/Desktop/bar_ws/src/bar_ros2/ops/lite/scripts/bilateral_fsm_ready.sh --max-cycles 0
+```
+
+RoboDriver 监听 3 个 latched Bool 话题：
+
+| 指令 | 话题 | 含义 |
+|------|------|------|
+| 开始录制 | `/to_robodriver/start_collect` | `true` 开始新一段采集；`false` 只清 latch |
+| 结束录制 | `/to_robodriver/finish_collect` | `true` 停止当前采集并进入待确认；`false` 只清 latch |
+| 保存 / 丢弃 | `/to_robodriver/affirm_to_collect` | `true` 保存；`false` 丢弃 |
+
+手动调试时可以直接发 topic。开始录制：
+
+```bash
+ros2 topic pub --once \
+  --qos-reliability reliable \
+  --qos-durability transient_local \
+  /to_robodriver/start_collect \
+  std_msgs/msg/Bool "{data: true}"
+```
+
+结束录制：
+
+```bash
+ros2 topic pub --once \
+  --qos-reliability reliable \
+  --qos-durability transient_local \
+  /to_robodriver/finish_collect \
+  std_msgs/msg/Bool "{data: true}"
+```
+
+确认保存：
+
+```bash
+ros2 topic pub --once \
+  --qos-reliability reliable \
+  --qos-durability transient_local \
+  /to_robodriver/affirm_to_collect \
+  std_msgs/msg/Bool "{data: true}"
+```
+
+丢弃本段：
+
+```bash
+ros2 topic pub --once \
+  --qos-reliability reliable \
+  --qos-durability transient_local \
+  /to_robodriver/affirm_to_collect \
+  std_msgs/msg/Bool "{data: false}"
+```
+
+若需要清除 latched 指令，向同一话题发 `false`。`affirm_to_collect=false` 在 `finish_collect=true` 之后表示丢弃，平时不要乱发。
+
+### 6.6 录制成功后检查数据
+
+保存成功时 RoboDriver 终端应看到：
+
+```text
+save_episode succcess
+Data validate complete
+```
+
+数据默认位于：
+
+```text
+/media/stvli/0EE4-E658/YYYYMMDD/user/deepcybo_lite_bilateral_YYYYMMDD/<repo_id>/
+```
+
+快速找最新数据集：
+
+```bash
+find /media/stvli/0EE4-E658 -path '*/meta/info.json' -printf '%T@ %p\n' 2>/dev/null \
+  | sort -nr \
+  | head -5
+```
+
+快速检查 LeRobot 关键字段：
+
+```bash
+DATASET_ROOT=/media/stvli/0EE4-E658/YYYYMMDD/user/deepcybo_lite_bilateral_YYYYMMDD/替换成最新repo目录
+
+python - <<PY
+from pathlib import Path
+import json
+import pyarrow.parquet as pq
+
+root = Path("$DATASET_ROOT")
+info = json.loads((root / "meta/info.json").read_text())
+print("action shape:", info["features"]["action"]["shape"])
+print("state shape:", info["features"]["observation.state"]["shape"])
+print("image keys:", [k for k, v in info["features"].items() if v["dtype"] == "image"])
+
+pq_path = next((root / "data").glob("chunk-*/episode_*.parquet"))
+table = pq.read_table(pq_path)
+print("rows:", table.num_rows)
+print("columns:", table.column_names)
+for key in [k for k, v in info["features"].items() if v["dtype"] == "image"]:
+    cell = table.column(key)[0].as_py()
+    print(key, "bytes:", cell["bytes"], "path:", cell["path"])
+PY
+```
+
+正常结果：
+
+```text
+action shape: [16]
+state shape: [16]
+columns 中包含 observation.images.image_head / image_wrist_left / image_wrist_right
+每个 image cell 中 bytes 为 None，path 指向 images/.../frame_xxxxxx.jpg
+```
+
+注意：图像像素不应写入 parquet。parquet 只保存 Hugging Face `Image` 类型的路径引用，真实 JPEG/PNG 位于数据集根目录的 `images/` 下。VSCode parquet viewer 可能因文件大小限制截断显示；以 `pyarrow` 打印的 `rows` 和 image cell 为准。
+
+### 6.7 停止 RoboDriver
+
+录制结束后，在 RoboDriver 终端按 `Ctrl+C`。确认没有残留进程：
+
+```bash
+pgrep -af 'robodriver\.scripts\.run|deepcybo-lite-aio-ros2' || echo "RoboDriver 已退出"
+```
 
 ---
 
