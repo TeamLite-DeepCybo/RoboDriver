@@ -1,5 +1,6 @@
 import json
 import importlib.util
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -91,8 +92,13 @@ def test_dorobot_dataset_writes_image_columns_to_episode_parquet(tmp_path):
         hf_meta["info"]["features"]["observation.images.image_head"]["_type"]
         == "Image"
     )
-    assert row["observation.images.image_head"]["bytes"] is not None
-    assert row["observation.images.image_head"]["path"] == "frame_000000.jpg"
+    assert row["observation.images.image_head"]["bytes"] is None
+    image_path = Path(row["observation.images.image_head"]["path"])
+    assert image_path.is_absolute()
+    assert image_path.exists()
+    assert image_path.relative_to(tmp_path) == Path(
+        "images/observation.images.image_head/episode_000000/frame_000000.jpg"
+    )
 
     loaded = datasets.load_dataset(
         "parquet", data_files=str(parquet_path), split="train"

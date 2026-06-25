@@ -40,7 +40,6 @@ from robodriver.utils.dataset import (
     create_lerobot_dataset_card,
     delete_episode,
     delete_episode_stats,
-    embed_images,
     get_delta_indices,
     get_episode_data_index,
     get_hf_features_from_features,
@@ -1200,7 +1199,6 @@ class DoRobotDataset(torch.utils.data.Dataset):
         ep_dataset = datasets.Dataset.from_dict(
             episode_dict, features=self.hf_features, split="train"
         )
-        ep_dataset = embed_images(ep_dataset)
         self.hf_dataset = concatenate_datasets([self.hf_dataset, ep_dataset])
         self.hf_dataset.set_transform(hf_transform_to_torch)
         ep_data_path = self.root / self.meta.get_data_file_path(ep_index=episode_index)
