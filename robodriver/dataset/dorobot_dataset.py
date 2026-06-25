@@ -46,6 +46,7 @@ from robodriver.utils.dataset import (
     get_hf_features_from_features,
     hf_transform_to_torch,
     is_valid_version,
+    load_image_as_numpy,
     load_episodes,
     load_episodes_stats,
     load_info,
@@ -817,8 +818,38 @@ class DoRobotDataset(torch.utils.data.Dataset):
         return {
             key: torch.stack(self.hf_dataset.select(q_idx)[key])
             for key, q_idx in query_indices.items()
-            if key not in self.meta.video_keys
+            if key not in self.meta.video_keys and key not in self.meta.image_keys
         }
+
+    def _query_images(
+        self,
+        query_indices: dict[str, list[int]] | None,
+        ep_idx: int,
+        frame_index: int,
+    ) -> dict[str, torch.Tensor]:
+        item = {}
+        for img_key in self.meta.image_keys:
+            if query_indices is not None and img_key in query_indices:
+                frame_indices = self.hf_dataset.select(query_indices[img_key])[
+                    "frame_index"
+                ]
+                frame_indices = [idx.item() for idx in frame_indices]
+            else:
+                frame_indices = [frame_index]
+
+            frames = []
+            for idx in frame_indices:
+                img_path = self._get_image_file_path(
+                    episode_index=ep_idx, image_key=img_key, frame_index=idx
+                )
+                image = load_image_as_numpy(
+                    img_path, dtype=np.float32, channel_first=True
+                )
+                frames.append(torch.from_numpy(image))
+
+            item[img_key] = torch.stack(frames).squeeze(0)
+
+        return item
 
     def _query_videos(
         self, query_timestamps: dict[str, list[float]], ep_idx: int
@@ -863,6 +894,11 @@ class DoRobotDataset(torch.utils.data.Dataset):
             query_timestamps = self._get_query_timestamps(current_ts, query_indices)
             video_frames = self._query_videos(query_timestamps, ep_idx)
             item = {**video_frames, **item}
+
+        if len(self.meta.image_keys) > 0:
+            frame_index = item["frame_index"].item()
+            image_frames = self._query_images(query_indices, ep_idx, frame_index)
+            item = {**image_frames, **item}
 
         if self.image_transforms is not None:
             image_keys = self.meta.camera_keys

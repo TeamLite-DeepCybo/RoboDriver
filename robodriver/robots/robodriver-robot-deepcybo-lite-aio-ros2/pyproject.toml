@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robodriver_robot_deepcybo_lite_aio_ros2"
+version = "0.1.0"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [
+    {name = "DeepCybo - Team Lite", email = "3190102290@zju.edu.cn"},
+]
+keywords = ["robotics", "lerobot", "deepcybo", "ros2"]
+dependencies = [
+  # ROS2 Jazzy 系统依赖（rclpy、message_filters 等）请 apt/rosdep 安装，勿写进 pip
+  "logging_mp",
+  "opencv-python",
+]
+
+[project.scripts]
+deepcybo-lite-mock-ros2 = "robodriver_robot_deepcybo_lite_aio_ros2.mock_recording:main"
+deepcybo-lite-smoke-record = "robodriver_robot_deepcybo_lite_aio_ros2.smoke_record:main"
+
+[tool.setuptools.packages.find]
+include = [
+    "robodriver_robot_deepcybo_lite_aio_ros2",
+    "lerobot_robot_deepcybo_lite_aio_ros2",
+]
