@@ -90,6 +90,7 @@ def system_info():
     return jsonify(
         {
             "status": "running",
+            "pipeline_mode": _pipeline_mode,
             "streams_active": active_count,
             "total_streams": len(stream_status),
             "timestamp": time.time(),
@@ -247,24 +248,49 @@ def stop_stream(stream_id):
 
 
 
-# ==== DeepCybo 内网数据管线 API ====
+# ==== DeepCybo 数据管线 API（双模式：internal / cloud）====
 import os as _os
 import sys as _sys
-_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", "RoboDriver-Server", "x86"))
+import yaml as _yaml
+
+_server_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                             "..", "..", "RoboDriver-Server", "x86")
+if _server_dir not in _sys.path:
+    _sys.path.insert(0, _server_dir)
 import internal_sync as _internal_sync
 
-_internal_syncer = None
+_backend = None
+_pipeline_mode = "internal"
 
-def _get_syncer():
-    global _internal_syncer
-    if _internal_syncer is None:
+def _load_pipeline_mode():
+    """从 setup.yaml 读取 pipeline_mode"""
+    global _pipeline_mode
+    setup_paths = [
+        _os.path.join(_server_dir, "setup.yaml"),
+        _os.path.join(_os.path.dirname(_server_dir), "arm", "setup.yaml"),
+    ]
+    for sp in setup_paths:
+        if _os.path.exists(sp):
+            with open(sp) as f:
+                cfg = _yaml.safe_load(f) or {}
+            _pipeline_mode = cfg.get("pipeline_mode", "internal")
+            return
+    # fallback: 环境变量
+    _pipeline_mode = _os.environ.get("PIPELINE_MODE", "internal")
+
+def _get_backend():
+    global _backend
+    if _backend is None:
+        _load_pipeline_mode()
         config_path = _os.environ.get(
             "INTERNAL_CONFIG_PATH",
-            _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
-                          "..", "..", "RoboDriver-Server", "x86", "internal_config.yaml")
+            _os.path.join(_server_dir, "internal_config.yaml")
         )
-        _internal_syncer = _internal_sync.InternalSync(config_path)
-    return _internal_syncer
+        _backend = _internal_sync.create_backend(
+            pipeline_mode=_pipeline_mode,
+            config_path=config_path,
+        )
+    return _backend
 
 
 @app.route("/api/dataset/sync", methods=["POST"])
@@ -283,7 +309,7 @@ def dataset_sync():
     sync_videos = data.get("sync_videos", False)
 
     try:
-        syncer = _get_syncer()
+        syncer = _get_backend()
         result = syncer.sync_dataset(
             source_path=source_path,
             dataset_name=dataset_name,
@@ -338,7 +364,7 @@ def dataset_convert():
 def dataset_connection_test():
     """测试内网目标服务器连接"""
     try:
-        syncer = _get_syncer()
+        syncer = _get_backend()
         result = syncer.test_connection()
         return jsonify(result)
     except Exception as e:
