@@ -103,6 +103,8 @@ class Coordinator:
         self.server_available = True
         # 用 asyncio 任务发心跳
         asyncio.create_task(self.send_heartbeat_loop())
+        # 非阻塞检查管线配置是否完整（仅打印引导提示）
+        asyncio.create_task(self._check_pipeline_config())
 
     async def stop(self):
         self.running = False
@@ -173,13 +175,13 @@ class Coordinator:
                     self._last_sync_detail = body
                     return {**base, "pipeline_sync": "ok", "server_response": body}
                 else:
-                    # 配置错误 / Server 内部错误 — 日志升级为 ERROR
                     err_text = body if isinstance(body, str) else body.get("error", str(body))
-                    logger.error(
+                    logger.warning(
                         "Pipeline sync FAILED (HTTP %s). "
-                        "Server may be misconfigured (check internal_config.yaml / setup.yaml). "
+                        "Server may be misconfigured — "
+                        "run 'curl %s/api/dataset/config_status' for hints. "
                         "Data is SAFE on local disk.  Error: %s",
-                        resp.status, err_text,
+                        resp.status, self.server_url, err_text,
                     )
                     self._last_sync_ok = False
                     self._last_sync_detail = {"http_status": resp.status, "error": err_text}
@@ -199,6 +201,39 @@ class Coordinator:
             self._last_sync_ok = False
             self._last_sync_detail = {"error": str(e)}
             return {**base, "pipeline_sync": "failed", "error": str(e)}
+
+    async def _check_pipeline_config(self) -> None:
+        """Non-blocking config check — prints guided CLI hints.
+
+        Called on startup and after affirm=true.  Never blocks, never raises.
+        """
+        if not self.server_available:
+            return
+        try:
+            async with self.session.get(
+                f"{self.server_url}/api/dataset/config_status",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status != 200:
+                    return
+                status = await resp.json()
+                if status.get("ok"):
+                    return
+
+                mode = status.get("mode", "unknown")
+                missing = status.get("missing", [])
+                hints = status.get("hints", [])
+
+                logger.warning(
+                    "Pipeline config INCOMPLETE (mode=%s). "
+                    "Recording works normally — data stays on local disk. "
+                    "Missing: %s",
+                    mode, ", ".join(missing) if missing else "see hints",
+                )
+                for hint in hints:
+                    logger.warning("  Hint: %s", hint)
+        except Exception:
+            pass
 
     def _get_lite_collection_root(self) -> Path:
         try:
@@ -435,6 +470,9 @@ class Coordinator:
                     # Don't await — keep ROS2 FSM non-blocking.
                     # The task will log its own outcome and update _last_sync_*.
                     _sync_result = {"pipeline_sync": "triggered"}
+
+                    # Non-blocking config check for next-time guidance
+                    asyncio.create_task(self._check_pipeline_config())
 
                 return self._collection_result("success", {
                     **(data or {}),

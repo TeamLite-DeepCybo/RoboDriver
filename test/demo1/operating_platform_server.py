@@ -366,6 +366,22 @@ def dataset_convert():
         return jsonify({"error": str(e), "status": "failed"}), 500
 
 
+@app.route("/api/dataset/config_status", methods=["GET"])
+def dataset_config_status():
+    """返回当前管线配置状态：哪些字段已配，哪些缺失，以及 CLI 引导提示。"""
+    try:
+        syncer = _get_backend()
+        status = syncer.get_config_status()
+        return jsonify(status)
+    except Exception as e:
+        return jsonify({
+            "mode": _pipeline_mode,
+            "ok": False,
+            "configured": [],
+            "missing": ["backend_init_failed"],
+            "hints": [f"Backend init error: {e}. Check setup.yaml / internal_config.yaml / baai_env.sh."],
+        }), 500
+
 @app.route("/api/dataset/connection_test", methods=["GET"])
 def dataset_connection_test():
     """测试内网目标服务器连接"""
