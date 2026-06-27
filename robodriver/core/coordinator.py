@@ -142,6 +142,36 @@ class Coordinator:
             result["data"] = data
         return result
 
+    async def _trigger_pipeline_sync(self, source_path: str, dataset_name: str) -> None:
+        """Fire-and-forget: trigger RoboDriver-Server pipeline sync after ROS2 collection."""
+        if not source_path or not dataset_name:
+            return
+        if not self.server_available:
+            logger.info("Server unavailable, skipping pipeline sync trigger.")
+            return
+
+        sync_url = f"{self.server_url}/api/dataset/sync"
+        payload = {"source_path": source_path, "dataset_name": dataset_name}
+
+        try:
+            async with self.session.post(
+                sync_url,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    logger.info("Pipeline sync triggered: %s", result)
+                else:
+                    text = await resp.text()
+                    logger.warning(
+                        "Pipeline sync failed (HTTP %s): %s", resp.status, text
+                    )
+        except asyncio.TimeoutError:
+            logger.warning("Pipeline sync request timed out.")
+        except Exception:
+            logger.exception("Pipeline sync trigger error")
+
     def _get_lite_collection_root(self) -> Path:
         try:
             from robodriver_robot_deepcybo_lite_aio_ros2.config import (
@@ -349,13 +379,31 @@ class Coordinator:
             data = self.pending_save_data
             if keep:
                 logger.info(
-                    f"ROS2 collection kept: episode={self.pending_episode_index}"
+                    "ROS2 collection kept: episode=%s", self.pending_episode_index
                 )
+
+                # Extract path info for pipeline sync trigger
+                _src = (
+                    data.get("file_message", {}).get("file_local_path", "")
+                    if isinstance(data, dict) else ""
+                )
+                _name = (
+                    data.get("file_message", {}).get("file_name", "")
+                    if isinstance(data, dict) else ""
+                )
+
                 self.pending_episode_index = None
                 self.pending_save_data = None
                 self.pending_record_cmd = None
                 self.record = None
                 self._set_collection_state(CollectionState.IDLE)
+
+                # Fire-and-forget pipeline sync (non-blocking for ROS2 FSM)
+                if _src and _name:
+                    asyncio.create_task(
+                        self._trigger_pipeline_sync(_src, _name)
+                    )
+
                 return self._collection_result("success", data)
 
             self._set_collection_state(CollectionState.DISCARDING)
