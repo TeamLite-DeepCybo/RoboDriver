@@ -85,6 +85,8 @@ class Coordinator:
         self.pending_save_data = None
         self.pending_record_cmd = None
         self.last_collection_state_change_time = time.time()
+        self._last_sync_ok: Optional[bool] = None
+        self._last_sync_detail: Optional[dict] = None
         self.ros2_collection_sequence = 0
         self._collection_lock = asyncio.Lock()
 
@@ -142,13 +144,18 @@ class Coordinator:
             result["data"] = data
         return result
 
-    async def _trigger_pipeline_sync(self, source_path: str, dataset_name: str) -> None:
-        """Fire-and-forget: trigger RoboDriver-Server pipeline sync after ROS2 collection."""
+    async def _trigger_pipeline_sync(self, source_path: str, dataset_name: str) -> dict:
+        """Fire-and-forget: trigger RoboDriver-Server pipeline sync after ROS2 collection.
+
+        Returns a result dict with status so the caller can inspect the outcome.
+        Never raises — all errors are captured in the returned dict.
+        """
+        base = {"pipeline_sync": "attempted", "source_path": source_path}
         if not source_path or not dataset_name:
-            return
+            return {**base, "pipeline_sync": "skipped", "reason": "missing path or name"}
         if not self.server_available:
             logger.info("Server unavailable, skipping pipeline sync trigger.")
-            return
+            return {**base, "pipeline_sync": "skipped", "reason": "server unavailable"}
 
         sync_url = f"{self.server_url}/api/dataset/sync"
         payload = {"source_path": source_path, "dataset_name": dataset_name}
@@ -159,18 +166,39 @@ class Coordinator:
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
+                body = await resp.json() if resp.status == 200 else await resp.text()
                 if resp.status == 200:
-                    result = await resp.json()
-                    logger.info("Pipeline sync triggered: %s", result)
+                    logger.info("Pipeline sync OK: %s", body)
+                    self._last_sync_ok = True
+                    self._last_sync_detail = body
+                    return {**base, "pipeline_sync": "ok", "server_response": body}
                 else:
-                    text = await resp.text()
-                    logger.warning(
-                        "Pipeline sync failed (HTTP %s): %s", resp.status, text
+                    # 配置错误 / Server 内部错误 — 日志升级为 ERROR
+                    err_text = body if isinstance(body, str) else body.get("error", str(body))
+                    logger.error(
+                        "Pipeline sync FAILED (HTTP %s). "
+                        "Server may be misconfigured (check internal_config.yaml / setup.yaml). "
+                        "Data is SAFE on local disk.  Error: %s",
+                        resp.status, err_text,
                     )
+                    self._last_sync_ok = False
+                    self._last_sync_detail = {"http_status": resp.status, "error": err_text}
+                    return {
+                        **base,
+                        "pipeline_sync": "failed",
+                        "http_status": resp.status,
+                        "error": str(err_text),
+                    }
         except asyncio.TimeoutError:
-            logger.warning("Pipeline sync request timed out.")
-        except Exception:
-            logger.exception("Pipeline sync trigger error")
+            logger.error("Pipeline sync TIMEOUT — Server did not respond in 10s. Data is safe locally.")
+            self._last_sync_ok = False
+            self._last_sync_detail = {"error": "timeout"}
+            return {**base, "pipeline_sync": "failed", "error": "timeout"}
+        except Exception as e:
+            logger.exception("Pipeline sync trigger error — data is safe locally.")
+            self._last_sync_ok = False
+            self._last_sync_detail = {"error": str(e)}
+            return {**base, "pipeline_sync": "failed", "error": str(e)}
 
     def _get_lite_collection_root(self) -> Path:
         try:
@@ -398,13 +426,20 @@ class Coordinator:
                 self.record = None
                 self._set_collection_state(CollectionState.IDLE)
 
-                # Fire-and-forget pipeline sync (non-blocking for ROS2 FSM)
+                # Fire pipeline sync in background; capture result for inspection
+                _sync_result = {"pipeline_sync": "not_triggered"}
                 if _src and _name:
-                    asyncio.create_task(
+                    _sync_task = asyncio.create_task(
                         self._trigger_pipeline_sync(_src, _name)
                     )
+                    # Don't await — keep ROS2 FSM non-blocking.
+                    # The task will log its own outcome and update _last_sync_*.
+                    _sync_result = {"pipeline_sync": "triggered"}
 
-                return self._collection_result("success", data)
+                return self._collection_result("success", {
+                    **(data or {}),
+                    **_sync_result,
+                })
 
             self._set_collection_state(CollectionState.DISCARDING)
             try:
