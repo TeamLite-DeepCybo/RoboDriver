@@ -619,3 +619,87 @@ RoboDriver 侧不需要推翻原有数采。我们要做的是：
 ```
 
 这样可以让 `bar_ws` 的 `bilateral_fsm_ready.sh` 在紧急 due 阶段成为 DeepCybo Lite 现场数采的统一控制入口，同时保留 RoboDriver 原本的 `Record` / `DoRobotDataset` 落盘能力，并为后续 HMI 接管准备同一套底层控制语义。
+
+---
+
+## 15. TODO: Pub-Sub → Client-Server 迁移方案
+
+> 状态：方案阶段，尚未开发  
+> 优先级：后续迭代
+
+### 动机
+
+当前 `bar_ws` FSM 通过 **ROS2 Topic（pub-sub）** 控制 RoboDriver 录制：
+
+```
+bar_ws FSM  ──publish──→  /to_robodriver/start_collect  (Bool)
+                          /to_robodriver/finish_collect (Bool)
+                          /to_robodriver/affirm_to_collect (Bool)
+```
+
+问题：
+
+| 问题 | 说明 |
+|------|------|
+| 无状态确认 | FSM 发布 `start_collect=true` 后无法确认 RoboDriver 是否真的开始录制，只能靠超时 blind-wait |
+| 重复发布去重 | FSM 每边沿连发三次以防丢包，Coordinator 端需去重逻辑 |
+| 时序竞态 | FSM 可能在 `finish_collect` → `start_collect` 间快速切换，Coordinator 状态机可能遗漏中间态 |
+| 缺乏健康检查 | FSM 无法在 gate 前查询"RoboDriver 是否 alive + 关节/相机就绪" |
+
+### 目标架构
+
+```
+bar_ws FSM (Client)          RoboDriver Coordinator (Server)
+     │                              │
+     ├─ Request: start_collect ────→│
+     │                              ├─ 状态检查（关节/相机 OK?）
+     │                              ├─ 创建 Record
+     │←── Response: {ok, episode_id}│
+     │                              │
+     │  ... 遥操进行中 ...          │  ... 持续写帧 ...
+     │                              │
+     ├─ Request: finish_collect ───→│
+     │                              ├─ Record.stop() + save_episode()
+     │←── Response: {ok, frames, path}
+     │                              │
+     ├─ Request: affirm(keep=true) →│
+     │                              ├─ 保留 / 触发管线
+     │←── Response: {ok, sync_status}
+```
+
+**核心变化**：Topic → **ROS2 Service**（request-response），FSM 每一步都等待 RoboDriver 确认。
+
+### 实现清单
+
+- [ ] **RoboDriver 侧：新增 ROS2 Service 接口**
+  - 文件：`robodriver/core/ros2_collection_service.py`（新）
+  - 三个 service：`StartCollection.srv`、`FinishCollection.srv`、`AffirmCollection.srv`
+  - 每个 service 返回当前 `CollectionState` + 附加数据（episode_id、frames、sync_status）
+  - 替代（或并存于）当前 `Ros2CollectionBridge`
+
+- [ ] **RoboDriver 侧：Coordinator 新增状态查询**
+  - `get_collection_health()` — 返回关节/相机是否就绪（供 FSM gate 前查询）
+  - `get_collection_state()` — 返回当前 `CollectionState` 枚举
+  - `get_last_sync_status()` — 返回最近一次管线同步结果
+
+- [ ] **bar_ws 侧：FSM 改为 Client 模式**
+  - `bilateral_fsm_loop.py` 中 topic publish → service call
+  - 每次调用后检查 response `ok` 字段再推进状态机
+  - Gate 前先调 `get_collection_health()`，不 ready 则提示操作员
+
+- [ ] **兼容性过渡**
+  - 短期：Service + Topic 并存，`Ros2CollectionBridge` 保留
+  - 长期：FSM 完全切到 Service 后废弃 Topic 路径
+
+- [ ] **测试**
+  - 单步 service call 验证
+  - FSM 全流程端到端（start → 遥操 → finish → affirm → sync）
+  - 异常注入（RoboDriver 宕机时 FSM 超时处理）
+
+### 设计原则
+
+- **确认制**：FSM 不 blind-publish，每步等 response
+- **幂等**：重复 `start_collect` request 返回"already collecting"而非创建新 Record
+- **超时安全**：Service call 设 timeout，超时后 FSM 进入安全态（停止遥操、保留本地数据）
+- **不丢数据**：无论通信是否异常，数据始终先安全落本地
+
