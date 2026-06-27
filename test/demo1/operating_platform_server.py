@@ -254,7 +254,7 @@ import sys as _sys
 import yaml as _yaml
 
 _server_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
-                             "..", "..", "RoboDriver-Server", "x86")
+                             "..", "..", "..", "RoboDriver-Server", "x86")
 if _server_dir not in _sys.path:
     _sys.path.insert(0, _server_dir)
 import internal_sync as _internal_sync
@@ -282,10 +282,16 @@ def _get_backend():
     global _backend
     if _backend is None:
         _load_pipeline_mode()
-        config_path = _os.environ.get(
-            "INTERNAL_CONFIG_PATH",
-            _os.path.join(_server_dir, "internal_config.yaml")
-        )
+        if _pipeline_mode == "cloud":
+            config_path = _os.environ.get(
+                "INTERNAL_CONFIG_PATH",
+                _os.path.join(_server_dir, "setup.yaml")
+            )
+        else:
+            config_path = _os.environ.get(
+                "INTERNAL_CONFIG_PATH",
+                _os.path.join(_server_dir, "internal_config.yaml")
+            )
         _backend = _internal_sync.create_backend(
             pipeline_mode=_pipeline_mode,
             config_path=config_path,
