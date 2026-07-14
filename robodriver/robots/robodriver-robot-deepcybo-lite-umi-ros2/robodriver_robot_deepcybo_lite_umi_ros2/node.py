@@ -19,6 +19,8 @@ from rclpy.node import Node as ROS2Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import CompressedImage, JointState
+from std_msgs.msg import ColorRGBA
+from visualization_msgs.msg import Marker, MarkerArray
 
 import logging_mp
 
@@ -256,10 +258,58 @@ class DeepcyboLiteUmiRos2RobotNode(ROS2Node):
     # Debug overlay — implemented in Task 9; keep no-op stubs until then
     # ------------------------------------------------------------------
     def _init_debug_publishers(self) -> None:
-        self._debug_pubs = None
+        if not self.publish_debug:
+            self._debug_pubs = None
+            self._debug_marker_pub = None
+            return
+        t = self.topics
+        self._debug_pubs = {
+            "left": self.create_publisher(PoseStamped, "/umi/debug/eef_left", 10),
+            "right": self.create_publisher(PoseStamped, "/umi/debug/eef_right", 10),
+        }
+        self._debug_marker_pub = self.create_publisher(
+            MarkerArray, "/umi/debug/markers", 10
+        )
+        self.get_logger().info("debug overlay ON: /umi/debug/eef_* + /umi/debug/markers")
+
+    @staticmethod
+    def _quality_color(state) -> ColorRGBA:
+        # green = fresh compose; yellow = held (tracking or world gap);
+        # red = never composed / long stale
+        if state.world_fresh >= 1.0 and state.present >= 1.0:
+            return ColorRGBA(r=0.1, g=0.9, b=0.1, a=0.9)
+        if state.valid:
+            return ColorRGBA(r=0.9, g=0.8, b=0.1, a=0.9)
+        return ColorRGBA(r=0.9, g=0.1, b=0.1, a=0.9)
 
     def _publish_debug_pose(self, arm, state, stamp) -> None:
-        return
+        if self._debug_pubs is None or not state.valid:
+            return
+        ps = PoseStamped()
+        ps.header.stamp = stamp
+        ps.header.frame_id = "world"
+        p7 = state.pose7
+        ps.pose.position.x = float(p7[0])
+        ps.pose.position.y = float(p7[1])
+        ps.pose.position.z = float(p7[2])
+        ps.pose.orientation.x = float(p7[3])
+        ps.pose.orientation.y = float(p7[4])
+        ps.pose.orientation.z = float(p7[5])
+        ps.pose.orientation.w = float(p7[6])
+        self._debug_pubs[arm].publish(ps)
+
+        marker = Marker()
+        marker.header = ps.header
+        marker.ns = "umi_eef"
+        marker.id = 0 if arm == "left" else 1
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+        marker.pose = ps.pose
+        marker.scale.x = marker.scale.y = marker.scale.z = 0.03
+        marker.color = self._quality_color(state)
+        arr = MarkerArray()
+        arr.markers.append(marker)
+        self._debug_marker_pub.publish(arr)
 
     def destroy(self) -> None:
         super().destroy_node()
