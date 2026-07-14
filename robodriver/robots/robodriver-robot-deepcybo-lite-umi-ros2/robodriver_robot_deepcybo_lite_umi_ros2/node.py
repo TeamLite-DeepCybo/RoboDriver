@@ -1,0 +1,265 @@
+# robodriver_robot_deepcybo_lite_umi_ros2/node.py
+"""DeepCybo Lite UMI rig — ROS2 subscribe / stamp-pair / compose / cache.
+
+Data flow per head-camera frame (all stamps identical — they derive from the
+same image):  GripperTrack (head frame)  +  world_head PoseStamped
+              -> T_world_tcp = T_world_head @ T_head_tcp  (compose.py)
+Gripper opening comes from /lite/joint_states; cameras via approx-time sync.
+"""
+from __future__ import annotations
+
+import threading
+import time
+from typing import Dict, Optional
+
+import cv2
+import numpy as np
+from message_filters import ApproximateTimeSynchronizer, Subscriber
+from rclpy.node import Node as ROS2Node
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+from geometry_msgs.msg import PoseStamped
+from sensor_msgs.msg import CompressedImage, JointState
+
+import logging_mp
+
+from . import se3
+from .compose import (
+    EefComposer,
+    WorldBuffer,
+    build_quality_vector,
+    build_state_vector,
+    stamp_to_ns,
+)
+from .config import GRIPPER_JOINTS, DeepcyboLiteUmiRos2Topics
+
+try:
+    from lite_aruco_umi_msgs.msg import GripperTrack
+except ImportError as exc:  # pragma: no cover - needs collection ws overlay
+    GripperTrack = None
+    _MSGS_IMPORT_ERROR = exc
+else:
+    _MSGS_IMPORT_ERROR = None
+
+CONNECT_TIMEOUT_FRAME = 10
+CAMERA_WIDTH = 640
+CAMERA_HEIGHT = 480
+
+logger = logging_mp.get_logger(__name__)
+
+
+def _pose_to_T(pose) -> np.ndarray:
+    """geometry_msgs/Pose -> 4x4 (pure floats in, se3 does the math)."""
+    p, q = pose.position, pose.orientation
+    return se3.pos_quat_to_T([p.x, p.y, p.z], [q.x, q.y, q.z, q.w])
+
+
+class DeepcyboLiteUmiRos2RobotNode(ROS2Node):
+    def __init__(
+        self,
+        topics: Optional[DeepcyboLiteUmiRos2Topics] = None,
+        control_fps: int = 30,
+        camera_fps: int = 30,
+        publish_debug: bool = False,
+    ):
+        if GripperTrack is None:
+            raise ImportError(
+                "Cannot import lite_aruco_umi_msgs.msg.GripperTrack. Source the "
+                "collection workspace overlay before starting RoboDriver, e.g. "
+                "`source ~/ros2_ws/install/setup.bash`."
+            ) from _MSGS_IMPORT_ERROR
+
+        super().__init__("deepcybo_lite_umi_ros2_driver")
+        self.topics = topics or DeepcyboLiteUmiRos2Topics()
+        self.control_fps = control_fps
+        self.camera_fps = camera_fps
+        self.publish_debug = bool(publish_debug)
+
+        self.qos = QoSProfile(
+            durability=DurabilityPolicy.VOLATILE,
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+        )
+        self.qos_best_effort = QoSProfile(
+            durability=DurabilityPolicy.VOLATILE,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+        )
+
+        t = self.topics
+        self.create_subscription(
+            GripperTrack, t.track_left,
+            lambda msg: self._track_callback("left", msg), self.qos,
+        )
+        self.create_subscription(
+            GripperTrack, t.track_right,
+            lambda msg: self._track_callback("right", msg), self.qos,
+        )
+        self.create_subscription(
+            PoseStamped, t.world_head, self._world_callback, self.qos,
+        )
+        self.create_subscription(
+            JointState, t.joint_states, self._joint_state_callback,
+            self.qos_best_effort,
+        )
+
+        self.last_image_recv_time_ns = 0
+        self.min_camera_interval_ns = int(1e9 / max(camera_fps, 1))
+
+        self._world = WorldBuffer()
+        self._composer = {"left": EefComposer(), "right": EefComposer()}
+        self._eef_state = {"left": None, "right": None}   # latest EefState
+        self._grippers: Dict[str, float] = {}             # joint -> opening
+
+        self.recv_images: Dict[str, np.ndarray] = {}
+        self.recv_images_status: Dict[str, int] = {}
+
+        self.lock = threading.Lock()
+
+        self._init_image_message_filters()
+        self._init_debug_publishers()   # no-op unless publish_debug (Task 9)
+
+        logger.info(
+            "[DeepCybo Lite UMI] node ready | tracks=(%s, %s) world=%s "
+            "joints=%s control_fps=%s camera_fps=%s debug=%s",
+            t.track_left, t.track_right, t.world_head, t.joint_states,
+            control_fps, camera_fps, self.publish_debug,
+        )
+
+    # ------------------------------------------------------------------
+    # Stream A + C -> composed world-frame eef state
+    # ------------------------------------------------------------------
+    def _world_callback(self, msg: PoseStamped) -> None:
+        try:
+            ns = stamp_to_ns(msg.header.stamp.sec, msg.header.stamp.nanosec)
+            with self.lock:
+                self._world.add(ns, _pose_to_T(msg.pose))
+        except Exception as e:
+            self.get_logger().error(f"world_head callback error: {e}")
+
+    def _track_callback(self, arm: str, msg) -> None:
+        try:
+            ns = stamp_to_ns(msg.header.stamp.sec, msg.header.stamp.nanosec)
+            usable = bool(msg.present) and bool(msg.has_tcp)
+            T_head_tcp = _pose_to_T(msg.tcp_pose) if usable else None
+            with self.lock:
+                state = self._composer[arm].update(
+                    ns,
+                    T_head_tcp,
+                    tracked=bool(msg.tracked),
+                    present=bool(msg.present),
+                    reproj=float(msg.reproj),
+                    world=self._world,
+                )
+                self._eef_state[arm] = state
+            self._publish_debug_pose(arm, state, msg.header.stamp)  # Task 9
+        except Exception as e:
+            self.get_logger().error(f"track[{arm}] callback error: {e}")
+
+    # ------------------------------------------------------------------
+    # Stream B — gripper opening
+    # ------------------------------------------------------------------
+    def _joint_state_callback(self, msg: JointState) -> None:
+        try:
+            index = {name: i for i, name in enumerate(msg.name)}
+            if not all(j in index for j in GRIPPER_JOINTS):
+                return
+            with self.lock:
+                for joint in GRIPPER_JOINTS:
+                    i = index[joint]
+                    if i < len(msg.position):
+                        self._grippers[joint] = float(msg.position[i])
+        except Exception as e:
+            self.get_logger().error(f"JointState callback error: {e}")
+
+    # ------------------------------------------------------------------
+    # Cameras — 3x CompressedImage @ camera_fps (aio pattern)
+    # ------------------------------------------------------------------
+    def _init_image_message_filters(self) -> None:
+        t = self.topics
+        sub_head = Subscriber(self, CompressedImage, t.camera_head)
+        sub_wrist_l = Subscriber(self, CompressedImage, t.camera_wrist_left)
+        sub_wrist_r = Subscriber(self, CompressedImage, t.camera_wrist_right)
+        self.image_sync = ApproximateTimeSynchronizer(
+            [sub_head, sub_wrist_l, sub_wrist_r], queue_size=5, slop=0.05
+        )
+        self.image_sync.registerCallback(self._image_synchronized_callback)
+
+    def _image_synchronized_callback(self, head, wrist_left, wrist_right) -> None:
+        try:
+            now = time.time_ns()
+            if now - self.last_image_recv_time_ns < self.min_camera_interval_ns:
+                return
+            self.last_image_recv_time_ns = now
+            self._images_recv(head, "image_head")
+            self._images_recv(wrist_left, "image_wrist_left")
+            self._images_recv(wrist_right, "image_wrist_right")
+        except Exception as e:
+            self.get_logger().error(f"Image synchronized callback error: {e}")
+
+    def _images_recv(self, msg: CompressedImage, event_id: str) -> None:
+        try:
+            img_array = np.frombuffer(msg.data, dtype=np.uint8)
+            frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            if frame is None:
+                return
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            if frame.shape[0] != CAMERA_HEIGHT or frame.shape[1] != CAMERA_WIDTH:
+                frame = cv2.resize(frame, (CAMERA_WIDTH, CAMERA_HEIGHT))
+            with self.lock:
+                self.recv_images[event_id] = frame
+                self.recv_images_status[event_id] = CONNECT_TIMEOUT_FRAME
+        except Exception as e:
+            logger.error(f"recv image error ({event_id}): {e}")
+
+    # ------------------------------------------------------------------
+    # Accessors for robot.py (connect gating + per-frame vectors)
+    # ------------------------------------------------------------------
+    def left_valid(self) -> bool:
+        with self.lock:
+            s = self._eef_state["left"]
+            return s is not None and s.valid
+
+    def right_valid(self) -> bool:
+        with self.lock:
+            s = self._eef_state["right"]
+            return s is not None and s.valid
+
+    def grippers_valid(self) -> bool:
+        with self.lock:
+            return all(j in self._grippers for j in GRIPPER_JOINTS)
+
+    def state_vector(self) -> Optional[np.ndarray]:
+        with self.lock:
+            left, right = self._eef_state["left"], self._eef_state["right"]
+            if (
+                left is None or right is None
+                or not left.valid or not right.valid
+                or not all(j in self._grippers for j in GRIPPER_JOINTS)
+            ):
+                return None
+            return build_state_vector(
+                left, right,
+                self._grippers[GRIPPER_JOINTS[0]],
+                self._grippers[GRIPPER_JOINTS[1]],
+            )
+
+    def quality_vector(self) -> Optional[np.ndarray]:
+        with self.lock:
+            left, right = self._eef_state["left"], self._eef_state["right"]
+            if left is None or right is None:
+                return None
+            return build_quality_vector(left, right)
+
+    # ------------------------------------------------------------------
+    # Debug overlay — implemented in Task 9; keep no-op stubs until then
+    # ------------------------------------------------------------------
+    def _init_debug_publishers(self) -> None:
+        self._debug_pubs = None
+
+    def _publish_debug_pose(self, arm, state, stamp) -> None:
+        return
+
+    def destroy(self) -> None:
+        super().destroy_node()
