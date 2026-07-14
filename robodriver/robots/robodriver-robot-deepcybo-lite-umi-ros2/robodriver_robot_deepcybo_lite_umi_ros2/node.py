@@ -113,6 +113,13 @@ class DeepcyboLiteUmiRos2RobotNode(ROS2Node):
         self._composer = {"left": EefComposer(), "right": EefComposer()}
         self._eef_state = {"left": None, "right": None}   # latest EefState
         self._grippers: Dict[str, float] = {}             # joint -> opening
+        # A track and its same-stamp world pose arrive from independent nodes in
+        # any order. Compose is triggered by whichever arrives SECOND (see
+        # _track_callback / _world_callback), so ingest order does not matter.
+        # _pending_track holds a track still waiting for its world; _last_composed_ns
+        # guards against composing the same frame twice.
+        self._pending_track: Dict[str, Optional[tuple]] = {"left": None, "right": None}
+        self._last_composed_ns: Dict[str, Optional[int]] = {"left": None, "right": None}
 
         self.recv_images: Dict[str, np.ndarray] = {}
         self.recv_images_status: Dict[str, int] = {}
@@ -132,11 +139,40 @@ class DeepcyboLiteUmiRos2RobotNode(ROS2Node):
     # ------------------------------------------------------------------
     # Stream A + C -> composed world-frame eef state
     # ------------------------------------------------------------------
+    def _finalize_frame(self, arm: str, track: tuple):
+        """Compose one frame for `arm` exactly once. Call with self.lock held.
+
+        Returns (state, stamp_msg) for a later out-of-lock debug publish, or None
+        if this frame's stamp was already composed. `EefComposer.update` looks up
+        the world itself, so a still-missing world yields world_fresh=0 + hold-last.
+        """
+        ns, T_head_tcp, tracked, present, reproj, stamp_msg = track
+        if self._last_composed_ns[arm] == ns:
+            return None
+        state = self._composer[arm].update(
+            ns, T_head_tcp,
+            tracked=tracked, present=present, reproj=reproj, world=self._world,
+        )
+        self._eef_state[arm] = state
+        self._last_composed_ns[arm] = ns
+        return state, stamp_msg
+
     def _world_callback(self, msg: PoseStamped) -> None:
         try:
             ns = stamp_to_ns(msg.header.stamp.sec, msg.header.stamp.nanosec)
+            to_publish = []
             with self.lock:
                 self._world.add(ns, _pose_to_T(msg.pose))
+                # A pending track whose world just arrived can now compose fresh.
+                for arm in ("left", "right"):
+                    pend = self._pending_track[arm]
+                    if pend is not None and self._world.lookup(pend[0]) is not None:
+                        done = self._finalize_frame(arm, pend)
+                        self._pending_track[arm] = None
+                        if done is not None:
+                            to_publish.append((arm, done))
+            for arm, (state, stamp_msg) in to_publish:
+                self._publish_debug_pose(arm, state, stamp_msg)  # Task 9
         except Exception as e:
             self.get_logger().error(f"world_head callback error: {e}")
 
@@ -145,17 +181,30 @@ class DeepcyboLiteUmiRos2RobotNode(ROS2Node):
             ns = stamp_to_ns(msg.header.stamp.sec, msg.header.stamp.nanosec)
             usable = bool(msg.present) and bool(msg.has_tcp)
             T_head_tcp = _pose_to_T(msg.tcp_pose) if usable else None
+            track = (ns, T_head_tcp, bool(msg.tracked), bool(msg.present),
+                     float(msg.reproj), msg.header.stamp)
+            to_publish = []
             with self.lock:
-                state = self._composer[arm].update(
-                    ns,
-                    T_head_tcp,
-                    tracked=bool(msg.tracked),
-                    present=bool(msg.present),
-                    reproj=float(msg.reproj),
-                    world=self._world,
-                )
-                self._eef_state[arm] = state
-            self._publish_debug_pose(arm, state, msg.header.stamp)  # Task 9
+                # A pending track from an earlier frame means its world never
+                # arrived; finalize it now (world lookup misses -> world_fresh=0,
+                # hold-last) so the dropout is still recorded, before this frame.
+                pend = self._pending_track[arm]
+                if pend is not None and pend[0] != ns:
+                    done = self._finalize_frame(arm, pend)
+                    if done is not None:
+                        to_publish.append(done)
+                    self._pending_track[arm] = None
+                # This frame: compose now if its world is already buffered, else
+                # stash and let _world_callback finalize it when the world arrives.
+                if self._world.lookup(ns) is not None:
+                    done = self._finalize_frame(arm, track)
+                    self._pending_track[arm] = None
+                    if done is not None:
+                        to_publish.append(done)
+                else:
+                    self._pending_track[arm] = track
+            for state, stamp_msg in to_publish:
+                self._publish_debug_pose(arm, state, stamp_msg)  # Task 9
         except Exception as e:
             self.get_logger().error(f"track[{arm}] callback error: {e}")
 
@@ -180,9 +229,15 @@ class DeepcyboLiteUmiRos2RobotNode(ROS2Node):
     # ------------------------------------------------------------------
     def _init_image_message_filters(self) -> None:
         t = self.topics
-        sub_head = Subscriber(self, CompressedImage, t.camera_head)
-        sub_wrist_l = Subscriber(self, CompressedImage, t.camera_wrist_left)
-        sub_wrist_r = Subscriber(self, CompressedImage, t.camera_wrist_right)
+        # BEST_EFFORT so we receive from a best-effort usb_cam publisher (a
+        # RELIABLE subscriber gets nothing from a best-effort publisher, while a
+        # best-effort subscriber accepts both -- strictly the safer choice).
+        sub_head = Subscriber(self, CompressedImage, t.camera_head,
+                              qos_profile=self.qos_best_effort)
+        sub_wrist_l = Subscriber(self, CompressedImage, t.camera_wrist_left,
+                                 qos_profile=self.qos_best_effort)
+        sub_wrist_r = Subscriber(self, CompressedImage, t.camera_wrist_right,
+                                 qos_profile=self.qos_best_effort)
         self.image_sync = ApproximateTimeSynchronizer(
             [sub_head, sub_wrist_l, sub_wrist_r], queue_size=5, slop=0.05
         )
@@ -262,7 +317,6 @@ class DeepcyboLiteUmiRos2RobotNode(ROS2Node):
             self._debug_pubs = None
             self._debug_marker_pub = None
             return
-        t = self.topics
         self._debug_pubs = {
             "left": self.create_publisher(PoseStamped, "/umi/debug/eef_left", 10),
             "right": self.create_publisher(PoseStamped, "/umi/debug/eef_right", 10),
