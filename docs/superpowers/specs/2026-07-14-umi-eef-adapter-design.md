@@ -210,3 +210,9 @@ in-bounds, no teleports at dropout boundaries.
 - **Feature naming vs LeRobot tooling:** the 16+7 named float features must
   round-trip through LeRobot's dataset schema like the aio adapter's motor
   features do; verified by `smoke_record.py`.
+- **Quality dims are for filtering, not for the policy.** Training configs
+  must select only the 16 pose/gripper dims as policy input and exclude the
+  7 quality floats, which exist to filter bad frames/episodes at load time.
+  This is a training-side (dataloader/config) responsibility, out of the
+  adapter's scope — documented in the package README so dataset consumers
+  don't feed quality flags into the model by accident.
