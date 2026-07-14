@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robodriver_robot_deepcybo_lite_umi_ros2"
+version = "0.1.0"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [
+    {name = "DeepCybo - Team Lite", email = "rayyz25@uw.edu"},
+]
+keywords = ["robotics", "lerobot", "deepcybo", "umi", "ros2"]
+dependencies = [
+  # ROS2 Jazzy system deps (rclpy, message_filters) via apt/rosdep, not pip.
+  # lite_aruco_umi_msgs comes from the sourced collection workspace overlay.
+  "logging_mp",
+  "opencv-python",
+  "numpy",
+]
+
+[project.scripts]
+deepcybo-lite-umi-mock-ros2 = "robodriver_robot_deepcybo_lite_umi_ros2.mock_umi_topics:main"
+deepcybo-lite-umi-smoke-record = "robodriver_robot_deepcybo_lite_umi_ros2.smoke_record:main"
+deepcybo-lite-umi-visualize-episode = "robodriver_robot_deepcybo_lite_umi_ros2.visualize_episode:main"
+
+[tool.setuptools.packages.find]
+include = ["robodriver_robot_deepcybo_lite_umi_ros2"]
