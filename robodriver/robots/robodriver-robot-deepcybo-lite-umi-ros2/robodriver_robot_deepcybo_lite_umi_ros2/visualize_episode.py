@@ -24,8 +24,6 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-from .config import EEF_FEATURE_NAMES, QUALITY_FEATURE_NAMES
-
 OBS_STATE = "observation.state"
 
 
@@ -74,6 +72,12 @@ def main(argv=None) -> None:
     args = parser.parse_args(argv)
 
     ds = LeRobotDataset(args.repo_id, root=args.root, episodes=[args.episode])
+    # Feature-name contract: observation.state is a flat vector whose column
+    # names live at ds.meta.features["observation.state"]["names"] (16 eef .pos
+    # then 7 quality .flag, in observation_features insertion order). If a future
+    # lerobot version nests these names under a different key, this KeyErrors /
+    # mislabels columns -- print ds.meta.features[OBS_STATE] once and adjust
+    # _state_index accordingly.
     names = ds.meta.features[OBS_STATE]["names"]
     idx = _state_index(names)
     arm_idx = _arm_slices(idx)
