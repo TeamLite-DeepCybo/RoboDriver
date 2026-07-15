@@ -126,7 +126,7 @@ class DeepcyboLiteAioRos2Robot(Robot):
 
         while True:
             cameras_ok = len(self._missing_cameras()) == 0
-            leader_ok = self._has_valid_leader_vector()
+            leader_ok = self._has_valid_leader_vector() if self.config.require_leader else True
             follower_ok = self._has_valid_follower_vector()
 
             if cameras_ok and leader_ok and follower_ok:
@@ -139,7 +139,7 @@ class DeepcyboLiteAioRos2Robot(Robot):
                         f"等待摄像头超时: 未收到 [{', '.join(self._missing_cameras())}]; "
                         f"已收到 [{', '.join(self._received_cameras())}]"
                     )
-                if not leader_ok:
+                if not leader_ok and self.config.require_leader:
                     parts.append(
                         f"等待 action(leader) 超时: 需要缓存键 '{LEADER_COMP}' "
                         f"且 {STATE_DIM} 维 canonical Lite 向量; "
@@ -211,7 +211,7 @@ class DeepcyboLiteAioRos2Robot(Robot):
     def get_action(self) -> dict[str, Any]:
         if not self.connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
-        if not self._has_valid_leader_vector():
+        if self.config.require_leader and not self._has_valid_leader_vector():
             raise DeviceNotConnectedError(
                 f"{self}: leader 关节/夹爪数据无效或 canonical {STATE_DIM} 维未恢复，本帧不采集 action"
             )

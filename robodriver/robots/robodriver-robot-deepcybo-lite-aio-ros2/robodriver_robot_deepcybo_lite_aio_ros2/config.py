@@ -132,6 +132,9 @@ class DeepcyboLiteAioRos2RobotConfig(RobotConfig):
 
     use_videos: bool = False
 
+    # 推理部署模式下无需主臂 leader 数据（默认 True 保持向后兼容）
+    require_leader: bool = True
+
     microphones: Dict[str, int] = field(default_factory=dict)
 
     ros2_topics: DeepcyboLiteRos2Topics = field(

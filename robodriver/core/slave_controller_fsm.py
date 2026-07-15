@@ -61,11 +61,12 @@ class SlaveControllerFsm:
     DAMPING_DURATION_S = 10.0       # zero_torque → damping 预置运动时长
     DAMPING_SETTLE_DURATION_S = 10.0  # remote_policy → zero_torque 间阻尼缓冲
 
-    def __init__(self, node: Node):
+    def __init__(self, node: Node, auto_mode: bool = False):
         self._node = node
         self.state = FsmState.ZERO_TORQUE
         self._exiting = False
         self._cycle_count = 0
+        self._auto_mode = auto_mode
 
         # ---- ROS2 服务客户端 ----
         self._switch_cli = node.create_client(
@@ -245,14 +246,15 @@ class SlaveControllerFsm:
             print('\n  [READY] 服务端未就绪，停留在 READY')
             return self.state
 
-        try:
-            self._prompt_enter(
-                f'\n  从臂 standby 到位，服务端已就绪。'
-                f'按 Enter 开始推理部署...'
-            )
-        except (KeyboardInterrupt, EOFError):
-            print('\n  [READY] 用户取消')
-            return self.state
+        if not self._auto_mode:
+            try:
+                self._prompt_enter(
+                    f'\n  从臂 standby 到位，服务端已就绪。'
+                    f'按 Enter 开始推理部署...'
+                )
+            except (KeyboardInterrupt, EOFError):
+                print('\n  [READY] 用户取消')
+                return self.state
 
         self._switch_to('remote_policy_controller')
         self.state = FsmState.REMOTE_POLICY

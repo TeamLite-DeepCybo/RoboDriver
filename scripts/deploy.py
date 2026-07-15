@@ -78,28 +78,27 @@ async def _run_inference_loop(
     )
 
 
-async def main(server_url: str, prompt: str, fps: int, chunk_size: int) -> None:
+async def main(server_url: str, prompt: str, fps: int, chunk_size: int, auto_mode: bool = False) -> None:
     rclpy.init()
     executor = MultiThreadedExecutor()
 
     # ---- 机器人 ----
-    from robodriver.robots.robots.robodriver_robot_deepcybo_lite_aio_ros2.robot import (
-        DeepcyboLiteAioRos2Robot,
-    )
-    from robodriver.robots.robots.robodriver_robot_deepcybo_lite_aio_ros2.config import (
+    from robodriver.robots.utils import make_robot_from_config
+    from robodriver_robot_deepcybo_lite_aio_ros2.config import (
         DeepcyboLiteAioRos2RobotConfig,
     )
     from robodriver.core.slave_controller_fsm import SlaveControllerFsm
 
     config = DeepcyboLiteAioRos2RobotConfig()
+    config.require_leader = False  # 部署模式不需要主臂
     config.control_fps = fps
     config.camera_fps = fps
 
-    robot = DeepcyboLiteAioRos2Robot(config)
+    robot = make_robot_from_config(config)
     executor.add_node(robot.get_node())
 
     # ---- FSM ----
-    fsm = SlaveControllerFsm(robot.get_node())
+    fsm = SlaveControllerFsm(robot.get_node(), auto_mode=auto_mode)
 
     spin_thread = threading.Thread(target=executor.spin, daemon=True)
     spin_thread.start()
@@ -178,12 +177,17 @@ if __name__ == '__main__':
         action='store_true',
         help='测试模式：控制频率降为正常的 1/5 (6Hz)，避免机械臂运动过于激烈',
     )
+    parser.add_argument(
+        '--auto',
+        action='store_true',
+        help='自动模式：跳过 Enter 确认，直接进入推理',
+    )
     args = parser.parse_args()
 
     fps = 6 if args.test else args.fps
     if args.test:
         print(f'[测试模式] 控制频率: {fps}Hz (正常频率的 1/5)')
     try:
-        asyncio.run(main(args.server_url, args.prompt, fps, args.chunk_size))
+        asyncio.run(main(args.server_url, args.prompt, fps, args.chunk_size, args.auto))
     except KeyboardInterrupt:
         pass
