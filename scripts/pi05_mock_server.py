@@ -51,6 +51,7 @@ _display_buffers: Dict[str, Optional[np.ndarray]] = {
 
 def _display_thread() -> None:
     """独立线程：持续刷新三路图片窗口。"""
+    global _show_images
     window_names = {
         "image_head": "Head Camera (头部相机)",
         "image_wrist_left": "Left Wrist Camera (左腕相机)",
