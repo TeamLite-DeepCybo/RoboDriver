@@ -468,3 +468,54 @@ python -m robodriver.scripts.deploy --server-url http://GPU_IP:9090 --prompt "�
 ```
 
 与 `DeepcyboLiteRos2Topics` 默认配置完全一致，无需额外 remap。
+
+---
+
+## 13. 从臂控制器状态机
+
+部署模式下的从臂控制器状态由 `SlaveControllerFsm`（`slave_controller_fsm.py`）统一管理，
+与数据采集 FSM（`bilateral_fsm_loop.py`）共享 `SwitchController` 服务调用模式。
+
+### 13.1 状态图
+
+```
+                    ┌──────────────────────────────────────────┐
+                    │                                          │
+                    ▼                                          │
+  ┌──────────┐  ┌─────────┐  ┌─────────┐  ┌───────┐  ┌────────────────┐
+  │ZERO_TORQUE│→│ DAMPING │→│ STANDBY │→│ READY │→│ REMOTE_POLICY   │
+  └──────────┘  │ (10s)   │  │(ramp)   │  └───┬───┘  │ (持续多chunk)  │
+       ▲        └─────────┘  └─────────┘      │      └───────┬────────┘
+       │                                       │              │
+       │          ┌──────────────┐             │    Ctrl+C / 任务完成
+       └──────────│DAMPING_SETTLE│◄────────────┘
+                  │   (10s)      │
+                  └──────┬───────┘
+                         │ 优雅退出
+                         ▼
+                  ┌──────────┐
+                  │ EXITING  │
+                  └──────────┘
+```
+
+### 13.2 各状态行为
+
+| 状态 | 控制器 | 持续条件 | 触发下一状态 |
+|------|--------|----------|-------------|
+| ZERO_TORQUE | zero_torque_controller | 瞬时 | 自动 → DAMPING |
+| DAMPING | damping_controller | 10s 预置运动 | 自动 → STANDBY |
+| STANDBY | standby_controller | 等待 ramp 完成 | 自动 → READY |
+| READY | standby_controller | 等待推理服务端就绪 + Enter | Enter → REMOTE_POLICY |
+| REMOTE_POLICY | remote_policy_controller | 持续请求 chunk 并回放 | Ctrl+C → DAMPING_SETTLE |
+| DAMPING_SETTLE | damping_controller | 10s 阻尼缓冲 | 自动 → ZERO_TORQUE (下一轮) 或 EXITING |
+| EXITING | zero_torque_controller | 终态 | — |
+
+### 13.3 与数据采集 FSM 的差异
+
+| 对比点 | 采集 FSM | 部署 FSM |
+|--------|----------|----------|
+| 管理范围 | 主臂 + 从臂 | 仅从臂 |
+| 任务间释放 | 不经过 zero_torque | 经过 damping(10s) → zero_torque |
+| 远程策略前检查 | 等待操作员 | 等待推理服务端 health check |
+| 远程策略内行为 | 单段遥操 | 持续多段 action chunk |
+| 退出 | damping(5s) → zero_torque | damping(10s) → zero_torque |
