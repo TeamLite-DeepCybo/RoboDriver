@@ -386,3 +386,85 @@ ROBOT_ACTION_DIM = 16    # 机器人实际控制维度（LITE_JOINT_NAMES 长度
 | `robodriver/robots/.../robot.py` | `send_action()` 接口（16 维 MITCommand） |
 | `robodriver/robots/.../node.py` | `ros_replay()` ROS2 发布 |
 | `robodriver/robots/utils.py` | `busy_wait()` |
+
+---
+
+## 10. 与 bar_ws / cam_ros2_ws 的集成拓扑
+
+### 10.1 现有主从遥操拓扑（采集模式）
+
+```
+cam_ros2_ws (camera_selection):
+  /deepcybo/lite/camera/head/image_raw/compressed        ← video*
+  /deepcybo/lite/camera/wrist_left/image_raw/compressed  ← video*
+  /deepcybo/lite/camera/wrist_right/image_raw/compressed ← video*
+
+bar_ws (dual_bilateral.launch.py):
+  Master stack:  /master/lite/joint_states
+  Slave stack:   /slave/lite/joint_states
+                 /slave/remote_policy_controller/command (MITCommand subscriber)
+  Bridge:        /master/lite/joint_states → /slave/remote_policy_controller/command
+```
+
+### 10.2 推理部署模式拓扑（只保留 slave）
+
+```
+cam_ros2_ws (camera_selection):  ← 不变
+  /deepcybo/lite/camera/{head,wrist_left,wrist_right}/image_raw/compressed
+
+bar_ws (只启动 slave stack，不启动 master/bridge):
+  Slave stack:   /slave/lite/joint_states  ──→ robot.get_observation()
+                 /slave/remote_policy_controller/command ←── ros_replay()
+
+RoboDriver (推理客户端):
+  DeepcyboLiteAioRos2RobotNode  订阅: 3路相机 + /slave/lite/joint_states
+                                 发布: /slave/remote_policy_controller/command
+  InferenceDeploymentLoop       同步主循环: obs → HTTP推理 → chunk回放
+  InferenceClient               HTTP POST → GPU推理服务器
+  ActionChunkReplayer           逐帧 send_action()
+```
+
+### 10.3 启动命令
+
+```bash
+# 1. 相机（现有，不变）
+ros2 launch usb_cam camera_selection.launch.py
+
+# 2. 从臂（仅 slave stack，不启动 master/bridge）
+ros2 launch bar_bringup_lite real.launch.py \
+  namespace:=slave \
+  hardware_config:=.../lite_hardware_slave.yaml \
+  calibration_file:=.../calibration_slave.yaml
+
+# 3. 推理服务端（GPU 机器上）
+python scripts/pi05_mock_server.py --port 9090
+
+# 4. 推理客户端（本机）
+python -m robodriver.scripts.deploy --server-url http://GPU_IP:9090 --prompt "任务指令"
+```
+
+---
+
+## 11. ROS2 Action 决策记录
+
+**决策：不引入 ROS2 Action 机制用于推理步骤。**
+
+理由：
+1. 架构原则要求算力与控制分离在不同机器，HTTP 无需 GPU 端安装 ROS2
+2. PI05 推理延迟（50-200ms）是短请求-响应模式，Action 的长时间任务语义不匹配
+3. Action 引入的反馈/抢占通道在当前单步推理场景中无实际收益
+4. 若未来做 RTC（逐帧实时控制），可重新评估 Action 的必要性
+
+---
+
+## 12. 相机话题说明
+
+`cam_ros2_ws` 通过 `camera_selection` 三摄像头选择器拉起，话题命名空间为：
+
+```
+/deepcybo/lite/camera/head/...
+/deepcybo/lite/camera/wrist_left/...
+/deepcybo/lite/camera/wrist_right/...
+```
+
+与 `DeepcyboLiteRos2Topics` 默认配置完全一致，无需额外 remap。
