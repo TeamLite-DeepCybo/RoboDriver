@@ -135,6 +135,49 @@ RoboDriver 已完成多款主流机器人的适配，按接入方式示例如下
 
 期待与您一起丰富 RoboDriver 的机器人生态！ 🤝
 
+
+## DeepCybo Lite — PI05 推理部署
+
+DeepCybo Lite 支持通过 PI05 推理模型实现"观测 → 推理 → 执行"的端到端闭环部署。
+算力（GPU 推理服务器）与控制（机器人）分离在不同机器上，通过 HTTP 请求-响应通信。
+
+### 新增模块
+
+| 文件 | 说明 |
+|------|------|
+| `robodriver/core/inference_client.py` | HTTP 推理通信客户端 |
+| `robodriver/core/action_chunk_replayer.py` | 128 维 action chunk 逐帧回放器 |
+| `robodriver/core/inference_deployment.py` | 推理部署同步主循环 |
+| `scripts/deploy.py` | 推理部署客户端入口 |
+| `scripts/pi05_mock_server.py` | Mock PI05 推理服务端（调试用） |
+| `docs/PI05_INFERENCE_DEPLOYMENT_PIPELINE_DESIGN.md` | 完整设计文档 |
+| `docs/PI05_SERVER_HANDOVER.md` | 下一代 Agent 交接文档 |
+
+### 快速启动
+
+```bash
+# 1. 启动 mock 推理服务（调试用，GPU 机器上运行）
+python scripts/pi05_mock_server.py --port 9090
+
+# 2. 启动推理客户端（机器人工控机上运行）
+conda activate robodriver_py312
+source /opt/ros/jazzy/setup.bash
+source ~/Desktop/bar_ws/install/setup.bash
+python scripts/deploy.py --server-url http://GPU_IP:9090 --prompt "任务指令"
+```
+
+### 从臂拉起
+
+推理客户端依赖从臂的 `/slave/lite/joint_states` 和 `/slave/remote_policy_controller/command`
+话题。从臂可通过 `bar_ros2` 仓库的部署脚本拉起：
+
+```bash
+cd ~/Desktop/bar_ws
+bash src/bar_ros2/ops/lite/scripts/deploy_slave.sh
+```
+
+完整部署流程见 `docs/PI05_INFERENCE_DEPLOYMENT_PIPELINE_DESIGN.md` 和 `bar_ros2` 仓库 README。
+
 ## 参与贡献
 
 我们真诚地欢迎来自社区的 *任何形式的贡献*。从**新功能的拉取请求**、**错误报告**，到甚至是使RoboDriver更易用的微小**建议**，我们都全心全意地感谢！
