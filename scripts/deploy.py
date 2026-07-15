@@ -173,9 +173,17 @@ if __name__ == '__main__':
     parser.add_argument(
         '--chunk-size', type=int, default=50, help='每段 action chunk 帧数'
     )
+    parser.add_argument(
+        '--test',
+        action='store_true',
+        help='测试模式：控制频率降为正常的 1/5 (6Hz)，避免机械臂运动过于激烈',
+    )
     args = parser.parse_args()
 
+    fps = 6 if args.test else args.fps
+    if args.test:
+        print(f'[测试模式] 控制频率: {fps}Hz (正常频率的 1/5)')
     try:
-        asyncio.run(main(args.server_url, args.prompt, args.fps, args.chunk_size))
+        asyncio.run(main(args.server_url, args.prompt, fps, args.chunk_size))
     except KeyboardInterrupt:
         pass

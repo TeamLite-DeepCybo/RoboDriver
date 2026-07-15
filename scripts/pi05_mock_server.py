@@ -1,46 +1,108 @@
 #!/usr/bin/env python3
-"""PI05 推理服务 Mock — 供客户端联调使用。
+"""PI05 推理服务 Mock — 回环测试用。
 
-模拟 PI05 推理服务端行为：
-  1. 接收 POST /api/v1/infer 请求
-  2. 以当前 state 为基础，叠加平滑正弦运动生成 action chunk
-  3. 前 16 维为有意义轨迹，后 112 维补 0
-  4. 可配置模拟推理延迟
+行为：
+  1. 解码请求中的三路 Base64 JPEG 图片，用 OpenCV 在显示屏上展示
+  2. 休眠 150ms 模拟推理延迟
+  3. 以机械臂当前位置为起点、全身关节零位为终点，生成 32 步线性插值 chunk
+  4. 前 16 维为线性插值轨迹，后 112 维补 0
 
 启动方式::
 
-    pip install fastapi uvicorn
-    python scripts/pi05_mock_server.py --port 9090 --delay-ms 50
+    pip install fastapi uvicorn opencv-python
+    python scripts/pi05_mock_server.py --port 9090
 
-协议详情见: PI05_INFERENCE_DEPLOYMENT_PIPELINE_DESIGN.md §3
+协议: PI05_INFERENCE_DEPLOYMENT_PIPELINE_DESIGN.md §3
 """
 
 from __future__ import annotations
 
 import argparse
-import math
+import base64
+import threading
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
+import cv2
 import numpy as np
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
-# 维度常量（与客户端 inference_client.py 保持一致）
+# 维度常量
 # ---------------------------------------------------------------------------
 STATE_DIM = 16
 ACTION_DIM = 128
-ROBOT_ACTION_DIM = 16  # 前 16 维有实际运动
+ROBOT_ACTION_DIM = 16
+CHUNK_SIZE = 32      # 固定 32 步线性插值
+MOCK_DELAY_MS = 150  # 固定 150ms
+
+# ---------------------------------------------------------------------------
+# 图片展示窗口
+# ---------------------------------------------------------------------------
+_show_images: bool = True
+_display_lock = threading.Lock()
+_display_buffers: Dict[str, Optional[np.ndarray]] = {
+    "image_head": None,
+    "image_wrist_left": None,
+    "image_wrist_right": None,
+}
+
+
+def _display_thread() -> None:
+    """独立线程：持续刷新三路图片窗口。"""
+    window_names = {
+        "image_head": "Head Camera (头部相机)",
+        "image_wrist_left": "Left Wrist Camera (左腕相机)",
+        "image_wrist_right": "Right Wrist Camera (右腕相机)",
+    }
+    cv2.namedWindow("Mock Server — Press Q to quit", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Mock Server — Press Q to quit", 640, 60)
+
+    while _show_images:
+        # 将三路图片拼接成一行展示
+        rows = []
+        with _display_lock:
+            for key in ("image_head", "image_wrist_left", "image_wrist_right"):
+                img = _display_buffers.get(key)
+                if img is not None:
+                    # 加标签
+                    labeled = img.copy()
+                    label = window_names.get(key, key)
+                    cv2.putText(labeled, label, (8, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                                (0, 255, 0), 2, cv2.LINE_AA)
+                    rows.append(labeled)
+                else:
+                    rows.append(np.zeros((480, 640, 3), dtype=np.uint8))
+
+        if rows:
+            canvas = np.hstack(rows)
+            cv2.imshow("PI05 Mock Server — 三路相机回显 (Press Q to quit)",
+                       cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
+
+        info_panel = np.zeros((60, 640 * 3, 3), dtype=np.uint8)
+        cv2.putText(info_panel,
+                    f"Mock Server running | Press Q to quit | delay={MOCK_DELAY_MS}ms chunk={CHUNK_SIZE}",
+                    (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    (200, 200, 200), 1, cv2.LINE_AA)
+        cv2.imshow("Mock Server — Press Q to quit", info_panel)
+
+        if cv2.waitKey(100) & 0xFF == ord('q'):
+            _show_images = False
+            break
+
+    cv2.destroyAllWindows()
+
 
 # ---------------------------------------------------------------------------
 # FastAPI App
 # ---------------------------------------------------------------------------
-app = FastAPI(title="PI05 Mock Inference Server", version="0.1.0")
+app = FastAPI(title="PI05 Mock Inference Server — Loopback Test", version="0.2.0")
 
-# 全局状态（模拟推理计数器，用于生成连续轨迹）
-_tick: int = 0
 _start_time: float = time.time()
+_request_count: int = 0
+_display_started: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +123,7 @@ class RequestMetadata(BaseModel):
     fps: int = 30
     state_dim: int = STATE_DIM
     action_dim: int = ACTION_DIM
-    chunk_size: int = 50
+    chunk_size: int = CHUNK_SIZE
     image_width: int = 640
     image_height: int = 480
     timestamp_unix: float = 0.0
@@ -78,7 +140,7 @@ class InferenceRequest(BaseModel):
 class ResponseMetadata(BaseModel):
     fps: int = 30
     inference_time_ms: float = 0.0
-    model_version: str = "pi05-v1.0-mock"
+    model_version: str = "pi05-v1.0-mock-loopback"
     timestamp_unix: float = 0.0
 
 
@@ -96,49 +158,48 @@ class InferenceResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Mock 推理逻辑
 # ---------------------------------------------------------------------------
-def _generate_mock_action_chunk(
+def _decode_image(b64_str: str) -> Optional[np.ndarray]:
+    """Base64 JPEG → RGB ndarray (H, W, 3)。"""
+    if not b64_str:
+        return None
+    try:
+        jpeg = base64.b64decode(b64_str)
+        img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            return None
+        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    except Exception:
+        return None
+
+
+def _generate_interpolation_chunk(
     state: np.ndarray,
-    chunk_size: int,
-    fps: int,
-    motion_scale: float = 0.1,
 ) -> np.ndarray:
-    """以当前 state 为基础，生成平滑正弦扰动的 action chunk。
+    """当前位置 → 全身关节零位的 32 步线性插值。
 
     Args:
-        state: (16,) 当前关节状态
-        chunk_size: 要生成的帧数
-        fps: 控制频率
-        motion_scale: 运动幅度缩放因子
+        state: (16,) float32 当前关节状态
 
     Returns:
-        (chunk_size, 128) float32 action chunk
+        (32, 128) float32 action chunk
+          - 前 16 维: 32 步线性插值轨迹
+          - 后 112 维: 全零
     """
-    global _tick
-
     state = np.asarray(state, dtype=np.float32).flatten()
     if state.shape[0] < ROBOT_ACTION_DIM:
         padded = np.zeros(ROBOT_ACTION_DIM, dtype=np.float32)
         padded[: state.shape[0]] = state
         state = padded
 
-    chunk = np.zeros((chunk_size, ACTION_DIM), dtype=np.float32)
+    zero_pos = np.zeros(ROBOT_ACTION_DIM, dtype=np.float32)
+    chunk = np.zeros((CHUNK_SIZE, ACTION_DIM), dtype=np.float32)
 
-    for frame_idx in range(chunk_size):
-        t = (_tick + frame_idx) / max(fps, 1)
+    for i in range(CHUNK_SIZE):
+        t = i / max(CHUNK_SIZE - 1, 1)  # 0.0 → 1.0
+        # 线性插值: start + (end - start) * t  =  state + (0 - state) * t
+        chunk[i, :ROBOT_ACTION_DIM] = state + (zero_pos - state) * t
 
-        # 前 16 维：在 state 基础上叠加平滑正弦运动
-        for joint_idx in range(ROBOT_ACTION_DIM):
-            phase = 0.37 * joint_idx
-            slow = math.sin(2.0 * math.pi * 0.13 * t + phase)
-            fast = 0.25 * math.sin(2.0 * math.pi * 0.43 * t + phase * 0.5)
-            chunk[frame_idx, joint_idx] = (
-                float(state[joint_idx]) + motion_scale * (slow + fast)
-            )
-
-        # 后 112 维：补 0（预留灵巧手等）
-        # chunk[frame_idx, 16:128] already zeros
-
-    _tick += chunk_size
+    # 后 112 维保持为 0
     return chunk
 
 
@@ -149,21 +210,33 @@ def _generate_mock_action_chunk(
 async def health() -> Dict[str, Any]:
     return {
         "status": "ok",
-        "model_loaded": "pi05-v1.0-mock",
+        "model_loaded": "pi05-v1.0-mock-loopback",
         "gpu_available": False,
         "mock_mode": True,
+        "test_mode": "loopback",
         "uptime_s": time.time() - _start_time,
-        "requests_processed": _tick,
+        "requests_processed": _request_count,
     }
 
 
 @app.post("/api/v1/infer", response_model=InferenceResponse)
-async def infer(req: InferenceRequest, delay_ms: float = 0.0) -> InferenceResponse:
-    """接收推理请求，生成 mock action chunk。
+async def infer(req: InferenceRequest) -> InferenceResponse:
+    global _request_count, _display_started
 
-    查询参数 ``delay_ms`` 可用于模拟推理延迟（默认从命令行 --delay-ms 设置）。
-    """
     t0 = time.perf_counter()
+    _request_count += 1
+
+    # ---- 0. 显示图片 ----
+    if not _display_started:
+        _display_started = True
+        threading.Thread(target=_display_thread, daemon=True).start()
+
+    images_raw = req.observation.images
+    for key in ("image_head", "image_wrist_left", "image_wrist_right"):
+        b64_str = getattr(images_raw, key, "")
+        img = _decode_image(b64_str)
+        with _display_lock:
+            _display_buffers[key] = img
 
     # ---- 1. 校验 ----
     state = np.array(req.observation.state, dtype=np.float32)
@@ -172,28 +245,24 @@ async def infer(req: InferenceRequest, delay_ms: float = 0.0) -> InferenceRespon
             request_id=req.request_id,
             status="error",
             error_code="INVALID_STATE_DIM",
-            error_message=(
-                f"state dim={state.shape[0]} < required {STATE_DIM}"
-            ),
+            error_message=f"state dim={state.shape[0]} < required {STATE_DIM}",
             metadata=ResponseMetadata(timestamp_unix=time.time()),
         )
 
-    # ---- 2. 模拟推理延迟 ----
-    if delay_ms > 0:
-        time.sleep(delay_ms / 1000.0)
+    # ---- 2. 模拟推理延迟 150ms ----
+    time.sleep(MOCK_DELAY_MS / 1000.0)
 
-    # ---- 3. 生成 mock action chunk ----
-    chunk_size = req.metadata.chunk_size or 50
-    fps = req.metadata.fps or 30
-    action_chunk = _generate_mock_action_chunk(state, chunk_size, fps)
+    # ---- 3. 生成 32 步线性插值 chunk ----
+    action_chunk = _generate_interpolation_chunk(state)
 
     dt_ms = (time.perf_counter() - t0) * 1000.0
 
     # ---- 4. 返回 ----
     print(
-        f"[mock] request_id={req.request_id} "
-        f"prompt='{req.prompt[:50]}' "
-        f"chunk=({chunk_size}, {ACTION_DIM}) "
+        f"[mock] #{_request_count} request_id={req.request_id} "
+        f"prompt='{req.prompt[:40]}' "
+        f"state[:3]={[round(v,4) for v in state[:3].tolist()]}... "
+        f"chunk=({CHUNK_SIZE}, {ACTION_DIM}) "
         f"inference={dt_ms:.1f}ms"
     )
 
@@ -201,12 +270,12 @@ async def infer(req: InferenceRequest, delay_ms: float = 0.0) -> InferenceRespon
         request_id=req.request_id,
         status="ok",
         action_chunk=action_chunk.tolist(),
-        chunk_size=chunk_size,
+        chunk_size=CHUNK_SIZE,
         action_dim=ACTION_DIM,
         metadata=ResponseMetadata(
-            fps=fps,
+            fps=req.metadata.fps or 30,
             inference_time_ms=round(dt_ms, 1),
-            model_version="pi05-v1.0-mock",
+            model_version="pi05-v1.0-mock-loopback",
             timestamp_unix=time.time(),
         ),
     )
@@ -217,49 +286,25 @@ async def infer(req: InferenceRequest, delay_ms: float = 0.0) -> InferenceRespon
 # ---------------------------------------------------------------------------
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="PI05 Mock Inference Server"
+        description="PI05 Mock Inference Server — Loopback Test"
     )
-    parser.add_argument("--host", default="0.0.0.0", help="Bind address")
-    parser.add_argument("--port", type=int, default=9090, help="Bind port")
-    parser.add_argument(
-        "--delay-ms",
-        type=float,
-        default=50.0,
-        help="Simulated inference delay in milliseconds",
-    )
+    parser.add_argument("--host", default="127.0.0.1", help="Bind address (默认 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=9090, help="Bind port (默认 9090)")
     args = parser.parse_args()
 
     import uvicorn
 
-    # 将 delay_ms 注入到 infer 端点（通过 FastAPI dependency）
-    from fastapi import Query
+    print(f"[PI05 Mock Server — Loopback Test]")
+    print(f"  endpoint:  http://{args.host}:{args.port}")
+    print(f"  delay:     {MOCK_DELAY_MS}ms")
+    print(f"  chunk:     {CHUNK_SIZE} steps (linear interpolation → zero)")
+    print(f"  action:    {ACTION_DIM} dims (前16插值, 后112补零)")
+    print(f"  display:   三路相机图片回显 (OpenCV, Press Q to quit)")
+    print(f"  endpoints:")
+    print(f"    GET  http://{args.host}:{args.port}/api/v1/health")
+    print(f"    POST http://{args.host}:{args.port}/api/v1/infer")
 
-    # Monkey-patch: 为 infer 端点注入默认 delay_ms
-    # 简单方案：用闭包捕获
-    _delay_ms = args.delay_ms
-
-    # 替换 infer 端点以绑定默认 delay_ms
-    app.router.routes.clear()
-
-    @app.get("/api/v1/health")
-    async def _health():
-        return await health()
-
-    @app.post("/api/v1/infer", response_model=InferenceResponse)
-    async def _infer(
-        req: InferenceRequest,
-        delay_ms: float = Query(_delay_ms, alias="delay_ms"),
-    ):
-        return await infer(req, delay_ms=delay_ms)
-
-    print(f"[PI05 Mock Server] starting on {args.host}:{args.port}")
-    print(f"[PI05 Mock Server] mock delay: {_delay_ms}ms")
-    print(f"[PI05 Mock Server] action dim: {ACTION_DIM}")
-    print(f"[PI05 Mock Server] endpoints:")
-    print(f"  GET  http://{args.host}:{args.port}/api/v1/health")
-    print(f"  POST http://{args.host}:{args.port}/api/v1/infer")
-
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":

@@ -519,3 +519,46 @@ python -m robodriver.scripts.deploy --server-url http://GPU_IP:9090 --prompt "�
 | 远程策略前检查 | 等待操作员 | 等待推理服务端 health check |
 | 远程策略内行为 | 单段遥操 | 持续多段 action chunk |
 | 退出 | damping(5s) → zero_torque | damping(10s) → zero_torque |
+
+---
+
+## 14. 回环测试模式
+
+无需 GPU 和真实推理模型，在本机即可验证完整部署管线。
+
+### 14.1 Mock 服务端行为
+
+`scripts/pi05_mock_server.py` 回环测试模式：
+
+1. **图片回显**：解码请求中三路 Base64 JPEG，OpenCV 窗口实时展示头部/左腕/右腕相机画面
+2. **固定延迟**：150ms（`MOCK_DELAY_MS=150`）
+3. **线性插值轨迹**：当前位置 → 全身关节零位，32 步匀速插值
+4. **维度补齐**：前 16 维插值，后 112 维补零，返回 `(32, 128)` chunk
+
+### 14.2 测试频率
+
+客户端 `--test` 标志将控制频率降为 `30/5 = 6Hz`，避免机械臂以全速向零位运动。
+
+### 14.3 启动命令
+
+```bash
+# 终端 1: 从臂
+bash ~/Desktop/bar_ws/src/bar_ros2/ops/lite/scripts/deploy_slave.sh
+
+# 终端 2: Mock 推理服务 (127.0.0.1:9090)
+python ~/Desktop/robodriver_ws/src/RoboDriver/scripts/pi05_mock_server.py --port 9090
+
+# 终端 3: 推理客户端 (测试模式)
+conda activate robodriver_py312
+source /opt/ros/jazzy/setup.bash && source ~/Desktop/bar_ws/install/setup.bash
+cd ~/Desktop/robodriver_ws/src/RoboDriver
+python scripts/deploy.py --server-url http://127.0.0.1:9090 --prompt "回环测试" --test
+```
+
+### 14.4 预期行为
+
+1. Mock 服务端窗口显示三路相机实时画面
+2. 客户端以 6Hz 频率请求 → 收到 32 帧 chunk → 逐帧回放
+3. 机械臂从当前姿态向零位匀速运动（6Hz × 32帧 ≈ 5.3s 完成一轮）
+4. 每轮完成后经 DAMPING_SETTLE → ZERO_TORQUE → 下一轮
+5. 按 Q 关闭图片回显窗口，Ctrl+C 优雅退出
