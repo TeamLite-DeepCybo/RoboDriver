@@ -22,7 +22,12 @@ from rclpy.node import Node as ROS2Node
 from std_msgs.msg import ColorRGBA
 from visualization_msgs.msg import Marker, MarkerArray
 
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
+# Read with RoboDriver's own dataset class (the same one smoke_record writes with):
+# lerobot's LeRobotDataset is pinned to a newer CODEBASE_VERSION than DoRobotDataset
+# writes, so reading a locally recorded episode with it raises
+# BackwardCompatibilityError. Every read tool in robodriver (replayer, recorder,
+# scripts/replay, scripts/visual) uses DoRobotDataset; match that.
+from robodriver.dataset.dorobot_dataset import DoRobotDataset
 
 OBS_STATE = "observation.state"
 
@@ -71,7 +76,7 @@ def main(argv=None) -> None:
     parser.add_argument("--fps", type=float, default=30.0)
     args = parser.parse_args(argv)
 
-    ds = LeRobotDataset(args.repo_id, root=args.root, episodes=[args.episode])
+    ds = DoRobotDataset(args.repo_id, root=args.root, episodes=[args.episode])
     # Feature-name contract: observation.state is a flat vector whose column
     # names live at ds.meta.features["observation.state"]["names"] (16 eef .pos
     # then 7 quality .flag, in observation_features insertion order). If a future
