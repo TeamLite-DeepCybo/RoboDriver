@@ -53,11 +53,11 @@ def main(argv=None) -> None:
         publish_debug=True,
     )
     node.get_logger().info(
-        "debug-overlay runner up | consuming tracks=(%s, %s) world=%s | "
-        "publishing /umi/debug/eef_left|right + /umi/debug/markers (frame=world). "
-        "Open RViz (Fixed Frame=world) and compare against gripper_<arm> TF.",
-        cfg.ros2_topics.track_left, cfg.ros2_topics.track_right,
-        cfg.ros2_topics.world_head,
+        f"debug-overlay runner up | consuming tracks=("
+        f"{cfg.ros2_topics.track_left}, {cfg.ros2_topics.track_right}) "
+        f"world={cfg.ros2_topics.world_head} | publishing "
+        "/umi/debug/eef_left|right + /umi/debug/markers (frame=world). "
+        "Open RViz (Fixed Frame=world) and compare against gripper_<arm> TF."
     )
 
     executor = MultiThreadedExecutor()
