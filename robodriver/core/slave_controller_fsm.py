@@ -119,9 +119,12 @@ class SlaveControllerFsm:
         if not self._list_cli.wait_for_service(timeout_sec=2.0):
             return None
         future = self._list_cli.call_async(ListControllers.Request())
-        rclpy.spin_until_future_complete(self._node, future, timeout_sec=2.0)
+        # 轮询等待（避免破坏 MultiThreadedExecutor）
+        _dl = time.time() + 2.0
+        while not future.done() and time.time() < _dl:
+            time.sleep(0.01)
         if not future.done():
-            return None
+            raise RuntimeError(f'service call timed out after {2.0}s')
         resp = future.result()
         for c in resp.controller:
             if c.name in MODE_CONTROLLERS and c.state == 'active':
@@ -157,15 +160,19 @@ class SlaveControllerFsm:
                 req.strictness = SwitchController.Request.STRICT
                 req.activate_asap = True
                 future = self._switch_cli.call_async(req)
-                rclpy.spin_until_future_complete(self._node, future, timeout_sec=2.0)
-                if future.done():
-                    resp = future.result()
-                    if resp.ok:
-                        logger.info(
-                            f'[FSM] {all_active or "[]"} -> {target} '
-                            f'(attempt {attempt + 1})'
-                        )
-                        return
+                # 轮询等待（避免破坏 MultiThreadedExecutor）
+                _dl = time.time() + 2.0
+                while not future.done() and time.time() < _dl:
+                    time.sleep(0.01)
+                if not future.done():
+                    raise RuntimeError(f'service call timed out after {2.0}s')
+                resp = future.result()
+                if resp.ok:
+                    logger.info(
+                        f'[FSM] {all_active or "[]"} -> {target} '
+                        f'(attempt {attempt + 1})'
+                    )
+                    return
                 logger.info(
                     f'[FSM] retry {attempt + 1}/20: '
                     f'switch rejected (active={all_active}), waiting 0.5s...'
@@ -180,9 +187,12 @@ class SlaveControllerFsm:
             req.strictness = SwitchController.Request.STRICT
             req.activate_asap = True
             future = self._switch_cli.call_async(req)
-            rclpy.spin_until_future_complete(self._node, future, timeout_sec=10.0)
+            # 轮询等待（避免破坏 MultiThreadedExecutor）
+            _dl = time.time() + 10.0
+            while not future.done() and time.time() < _dl:
+                time.sleep(0.01)
             if not future.done():
-                raise RuntimeError(f'[FSM] switch to {target} timed out')
+                raise RuntimeError(f'service call timed out after {10.0}s')
             resp = future.result()
             if not resp.ok:
                 raise RuntimeError(f'[FSM] switch rejected: {active} -> {target}')
@@ -192,9 +202,12 @@ class SlaveControllerFsm:
         if not self._list_cli.wait_for_service(timeout_sec=2.0):
             return []
         future = self._list_cli.call_async(ListControllers.Request())
-        rclpy.spin_until_future_complete(self._node, future, timeout_sec=2.0)
+        # 轮询等待（避免破坏 MultiThreadedExecutor）
+        _dl = time.time() + 2.0
+        while not future.done() and time.time() < _dl:
+            time.sleep(0.01)
         if not future.done():
-            return []
+            raise RuntimeError(f'service call timed out after {2.0}s')
         resp = future.result()
         return [c.name for c in resp.controller if c.state == "active" and c.name not in PROTECTED_CONTROLLERS]
 
@@ -203,9 +216,12 @@ class SlaveControllerFsm:
         if not self._list_cli.wait_for_service(timeout_sec=2.0):
             return []
         future = self._list_cli.call_async(ListControllers.Request())
-        rclpy.spin_until_future_complete(self._node, future, timeout_sec=2.0)
+        # 轮询等待（避免破坏 MultiThreadedExecutor）
+        _dl = time.time() + 2.0
+        while not future.done() and time.time() < _dl:
+            time.sleep(0.01)
         if not future.done():
-            return []
+            raise RuntimeError(f'service call timed out after {2.0}s')
         resp = future.result()
         return [f"{c.name}({c.state})" for c in resp.controller]
 
