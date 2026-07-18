@@ -40,6 +40,7 @@ async def _run_inference_loop(
     fps: int,
     chunk_size: int,
     debug_state: bool = False,
+    spin_thread=None,
 ) -> None:
     """REMOTE_POLICY 阶段的推理主循环：持续请求 chunk 并回放。
 
@@ -66,6 +67,9 @@ async def _run_inference_loop(
 
     try:
         while loop_obj._running:
+            if spin_thread and not spin_thread.is_alive():
+                logger.critical('[SPIN-DEAD] executor thread died!')
+                break
             await loop_obj._tick()
     except KeyboardInterrupt:
         print('\n  [推理中] 收到中断信号')
@@ -137,6 +141,7 @@ async def main(server_url: str, prompt: str, fps: int, chunk_size: int, auto_mod
                 await _run_inference_loop(
                     robot, server_url, prompt, fps, chunk_size,
                     debug_state=args.debug_state,
+                    spin_thread=spin_thread,
                 )
             except KeyboardInterrupt:
                 pass
