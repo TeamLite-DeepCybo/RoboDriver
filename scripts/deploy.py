@@ -109,6 +109,9 @@ async def main(server_url: str, prompt: str, fps: int, chunk_size: int, auto_mod
     logger.info('正在连接机器人...')
     robot.connect()
     logger.info('机器人已连接')
+    if args.debug_joint:
+        robot.robot_ros2_node.debug_joint = True
+        logger.info('[DEBUG-JOINT] 关节状态回调调试已启用')
 
     print('''
 ╔══════════════════════════════════════════════════════╗
@@ -189,6 +192,11 @@ if __name__ == '__main__':
         '--debug-state',
         action='store_true',
         help='调试模式：每次请求前打印上传的 16 维关节状态',
+    )
+    parser.add_argument(
+        '--debug-joint',
+        action='store_true',
+        help='调试模式：每次收到 joint_states 时打印前 3 个关节值',
     )
     args = parser.parse_args()
 

@@ -77,6 +77,7 @@ class DeepcyboLiteAioRos2RobotNode(ROS2Node):
         self.camera_fps = camera_fps
         self.command_stiffness = float(command_stiffness)
         self.command_damping = float(command_damping)
+        self.debug_joint = False  # --debug-joint 标志
 
         self.qos = QoSProfile(
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -222,6 +223,13 @@ class DeepcyboLiteAioRos2RobotNode(ROS2Node):
             if now - self.last_follow_send_time_ns < self.min_control_interval_ns:
                 return
             self.last_follow_send_time_ns = now
+
+            if self.debug_joint:
+                n = min(3, len(msg.position))
+                self.get_logger().info(
+                    f"[DEBUG-JOINT] recv {len(msg.name)} joints, first {n}: " +
+                    ", ".join(f"{msg.name[i]}={msg.position[i]:+.4f}" for i in range(n))
+                )
 
             merged = self._vector_from_joint_state(msg, "follower")
             self._commit_arm_state("follower", merged)
