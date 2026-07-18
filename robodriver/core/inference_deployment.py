@@ -1,7 +1,7 @@
 """PI05 推理部署同步主循环。
 
 职责：
-  1. 协调 InferenceClient（网络）与 ActionChunkReplayer（本地执行）
+  1. 协调 InferenceClient（网络）与 ActionChunkPublisher（本地执行）
   2. 同步主循环: 采集 obs → 请求推理 → 等待响应 → 回放 chunk → 重新采集
   3. 异常处理: 超时重试、错误降级、优雅退出
 
@@ -22,7 +22,7 @@ import numpy as np
 import logging_mp
 from lerobot.robots import Robot
 
-from .action_chunk_replayer import ActionChunkReplayer
+from .action_chunk_replayer import ActionChunkPublisher
 from .inference_client import (
     ACTION_DIM,
     STATE_DIM,
@@ -31,7 +31,7 @@ from .inference_client import (
     InferenceResponse,
 )
 
-logger = logging_mp.get_logger(__name__)
+logger = logging_mp.getLogger(__name__)
 
 # 最大连续推理失败次数（超过后退出主循环）
 MAX_CONSECUTIVE_INFER_FAILURES = 5
@@ -45,8 +45,8 @@ class InferenceDeploymentLoop:
         while running:
             1. 采集 observation
             2. POST /api/v1/infer → 阻塞等待
-            3. 收到 chunk → load 到 replayer
-            4. 等待 replayer 回放完毕
+            3. 收到 chunk → load 到 publisher
+            4. 等待 publisher 回放完毕
             5. 回到 1
     """
 
@@ -57,14 +57,16 @@ class InferenceDeploymentLoop:
         fps: int = 30,
         chunk_size: int = 50,
         prompt: str = "",
+        debug_state: bool = False,
     ):
         self.robot = robot
         self.fps = max(1, int(fps))
         self.chunk_size = max(1, int(chunk_size))
         self.prompt = prompt
+        self.debug_state = debug_state
 
         self.client = InferenceClient(server_url)
-        self.replayer = ActionChunkReplayer(robot, fps=fps)
+        self.publisher = ActionChunkPublisher(robot, fps=fps)
 
         self._running = False
         self._request_counter: int = 0
@@ -93,7 +95,7 @@ class InferenceDeploymentLoop:
         )
 
         # 2. 启动回放线程
-        self.replayer.start()
+        self.publisher.start()
         self._running = True
 
         logger.info(
@@ -113,7 +115,7 @@ class InferenceDeploymentLoop:
 
         logger.info(
             f"[InferenceDeployment] loop ended: "
-            f"requests={self._total_requests} frames={self.replayer.frames_sent}"
+            f"requests={self._total_requests} frames={self.publisher.frames_sent}"
         )
 
     async def stop(self) -> None:
@@ -123,7 +125,7 @@ class InferenceDeploymentLoop:
     async def _shutdown(self) -> None:
         """清理资源。"""
         self._running = False
-        self.replayer.stop()
+        self.publisher.stop()
         await self.client.stop()
 
     # ------------------------------------------------------------------
@@ -137,8 +139,8 @@ class InferenceDeploymentLoop:
             obs = capture()
             resp = await infer(obs)
             if resp.ok:
-                replayer.load_chunk(resp.action_chunk)
-                replayer.wait_idle()
+                publisher.load_chunk(resp.action_chunk)
+                publisher.wait_idle()
             else:
                 handle_error(resp)
         """
@@ -169,7 +171,7 @@ class InferenceDeploymentLoop:
         self._consecutive_failures = 0
         self._total_requests += 1
 
-        self.replayer.load_chunk(resp.action_chunk, resp.request_id)
+        self.publisher.load_chunk(resp.action_chunk, resp.request_id)
 
         logger.info(
             f"[InferenceDeployment] chunk #{self._total_requests}: "
@@ -179,11 +181,11 @@ class InferenceDeploymentLoop:
         )
 
         # 阻塞等待当前 chunk 回放完毕
-        self.replayer.wait_idle()
+        self.publisher.wait_idle()
 
         logger.info(
             f"[InferenceDeployment] chunk #{self._total_requests} replay done, "
-            f"total frames sent={self.replayer.frames_sent}"
+            f"total frames sent={self.publisher.frames_sent}"
         )
 
     # ------------------------------------------------------------------
@@ -209,9 +211,9 @@ class InferenceDeploymentLoop:
     ) -> tuple:
         """从 observation dict 中提取 state 向量和 images 字典。
 
-        使用 ActionChunkReplayer 的 _LITE_JOINT_NAMES 保证顺序一致。
+        使用 ActionChunkPublisher 的 _LITE_JOINT_NAMES 保证顺序一致。
         """
-        _NAMES = ActionChunkReplayer._LITE_JOINT_NAMES
+        _NAMES = ActionChunkPublisher._LITE_JOINT_NAMES
 
         state = np.array(
             [float(obs.get(f"follower_{name}.pos", 0.0)) for name in _NAMES],
@@ -237,6 +239,12 @@ class InferenceDeploymentLoop:
     ) -> InferenceResponse:
         """发送推理请求，带超时重试。"""
         state, images = self._extract_state_and_images(obs)
+
+        if self.debug_state:
+            logger.info(
+                f"[DEBUG-STATE] #{self._total_requests+1} uploading 16d: " +
+                "[" + ", ".join(f"{v:+.4f}" for v in state[:16]) + "]"
+            )
 
         self._request_counter += 1
         req = InferenceRequest(

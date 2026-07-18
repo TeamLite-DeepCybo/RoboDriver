@@ -29,8 +29,8 @@ from rclpy.executors import MultiThreadedExecutor
 
 import logging_mp
 
-logging_mp.basic_config(level=logging_mp.INFO)
-logger = logging_mp.get_logger(__name__)
+logging_mp.basicConfig(level=logging_mp.INFO)
+logger = logging_mp.getLogger(__name__)
 
 
 async def _run_inference_loop(
@@ -39,6 +39,7 @@ async def _run_inference_loop(
     prompt: str,
     fps: int,
     chunk_size: int,
+    debug_state: bool = False,
 ) -> None:
     """REMOTE_POLICY 阶段的推理主循环：持续请求 chunk 并回放。
 
@@ -53,11 +54,12 @@ async def _run_inference_loop(
         fps=fps,
         chunk_size=chunk_size,
         prompt=prompt,
+        debug_state=debug_state,
     )
 
     # 复用 InferenceDeploymentLoop 的主循环逻辑
     await loop_obj.client.start()
-    loop_obj.replayer.start()
+    loop_obj.publisher.start()
     loop_obj._running = True
 
     print('\n  [推理中] 持续请求 action chunk，按 Ctrl+C 停止...\n')
@@ -69,12 +71,12 @@ async def _run_inference_loop(
         print('\n  [推理中] 收到中断信号')
     finally:
         loop_obj._running = False
-        loop_obj.replayer.stop()
+        loop_obj.publisher.stop()
         await loop_obj.client.stop()
 
     logger.info(
         f'[推理] 本轮完成: requests={loop_obj._total_requests} '
-        f'frames={loop_obj.replayer.frames_sent}'
+        f'frames={loop_obj.publisher.frames_sent}'
     )
 
 
@@ -130,7 +132,8 @@ async def main(server_url: str, prompt: str, fps: int, chunk_size: int, auto_mod
             # ---- 3. 推理循环 ----
             try:
                 await _run_inference_loop(
-                    robot, server_url, prompt, fps, chunk_size
+                    robot, server_url, prompt, fps, chunk_size,
+                    debug_state=args.debug_state,
                 )
             except KeyboardInterrupt:
                 pass
@@ -175,19 +178,34 @@ if __name__ == '__main__':
     parser.add_argument(
         '--test',
         action='store_true',
-        help='测试模式：控制频率降为正常的 1/5 (6Hz)，避免机械臂运动过于激烈',
+        help='测试模式：控制频率降为 10Hz，避免机械臂运动过于激烈',
     )
     parser.add_argument(
         '--auto',
         action='store_true',
         help='自动模式：跳过 Enter 确认，直接进入推理',
     )
+    parser.add_argument(
+        '--debug-state',
+        action='store_true',
+        help='调试模式：每次请求前打印上传的 16 维关节状态',
+    )
     args = parser.parse_args()
 
-    fps = 6 if args.test else args.fps
+    fps = 10 if args.test else args.fps
     if args.test:
-        print(f'[测试模式] 控制频率: {fps}Hz (正常频率的 1/5)')
+        print(f'[测试模式] 控制频率: {fps}Hz (正常频率的 1/3)')
     try:
         asyncio.run(main(args.server_url, args.prompt, fps, args.chunk_size, args.auto))
     except KeyboardInterrupt:
-        pass
+        print('\n用户中断。')
+    except TimeoutError as e:
+        print(f'\n[连接超时] {e}')
+        print('可能原因：ROS2/DDS 尚未从上次运行中恢复。')
+        print('请等待 15-30 秒后重新拉起。')
+        import sys; sys.exit(1)
+    except Exception as e:
+        import traceback
+        print(f'\n[异常] {e}')
+        traceback.print_exc()
+        import sys; sys.exit(1)
