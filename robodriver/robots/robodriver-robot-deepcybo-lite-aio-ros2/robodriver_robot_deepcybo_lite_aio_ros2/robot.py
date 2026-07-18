@@ -199,6 +199,11 @@ class DeepcyboLiteAioRos2Robot(Robot):
             if comp_name not in self.robot_ros2_node.recv_follower:
                 continue
             vec = self.robot_ros2_node.recv_follower[comp_name]
+            if getattr(self.robot_ros2_node, 'debug_joint', False):
+                logger.info(
+                    f"[OBS-RAW] vec[:3]={[round(float(v), 4) for v in vec[:3]]} "
+                    f"follower_ok={self.robot_ros2_node._follower_arm_ok}"
+                )
             for i, joint_name in enumerate(joints.keys()):
                 obs_dict[f"follower_{joint_name}.pos"] = float(vec[i])
 
