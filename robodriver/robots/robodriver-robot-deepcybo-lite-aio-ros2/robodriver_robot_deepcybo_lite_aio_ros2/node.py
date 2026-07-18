@@ -132,6 +132,9 @@ class DeepcyboLiteAioRos2RobotNode(ROS2Node):
 
         self._init_image_message_filters()
 
+        # 诊断定时器：每 2s 打印心跳，验证 executor 存活
+        self._diag_timer = self.create_timer(2.0, self._diag_timer_callback)
+
         logger.info(
             "[DeepCybo Lite] node ready | joint_states=%s command=%s "
             "control_fps=%s camera_fps=%s",
@@ -285,6 +288,14 @@ class DeepcyboLiteAioRos2RobotNode(ROS2Node):
     # ------------------------------------------------------------------
     # 相机 — 3 路 CompressedImage @ camera_fps
     # ------------------------------------------------------------------
+    def _diag_timer_callback(self) -> None:
+        if self.debug_joint:
+            self.get_logger().info(
+                f'[DIAG-HEARTBEAT] joint_cb={self._joint_cb_count} '
+                f'cmd_cb={self._cmd_cb_count} '
+                f'follower_ok={self._follower_arm_ok}'
+            )
+
     def _init_image_message_filters(self) -> None:
         t = self.topics
         sub_head = Subscriber(self, CompressedImage, t.camera_head)
