@@ -80,6 +80,8 @@ class DeepcyboLiteAioRos2RobotNode(ROS2Node):
         self.debug_joint = False  # --debug-joint 标志
         self._joint_cb_count = 0
         self._joint_cb_skipped = 0
+        self._cmd_cb_count = 0
+        self._cmd_cb_skipped = 0
 
         self.qos = QoSProfile(
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -253,10 +255,24 @@ class DeepcyboLiteAioRos2RobotNode(ROS2Node):
 
     def command_callback(self, msg) -> None:
         try:
+            self._cmd_cb_count += 1
             now = time.time_ns()
+
+            if self.debug_joint and self._cmd_cb_count % 100 == 1:
+                self.get_logger().info(
+                    f"[DEBUG-CMD] cb #{self._cmd_cb_count}, "
+                    f"skipped={self._cmd_cb_skipped}"
+                )
+
             if now - self.last_main_send_time_ns < self.min_control_interval_ns:
+                self._cmd_cb_skipped += 1
                 return
             self.last_main_send_time_ns = now
+
+            if self.debug_joint:
+                self.get_logger().info(
+                    f"[DEBUG-CMD-PASS] #{self._cmd_cb_count}"
+                )
 
             merged = self._vector_from_mit_command(msg, "leader")
             self._commit_arm_state("leader", merged)
