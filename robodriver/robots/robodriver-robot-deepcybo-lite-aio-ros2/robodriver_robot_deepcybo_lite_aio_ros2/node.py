@@ -78,6 +78,8 @@ class DeepcyboLiteAioRos2RobotNode(ROS2Node):
         self.command_stiffness = float(command_stiffness)
         self.command_damping = float(command_damping)
         self.debug_joint = False  # --debug-joint 标志
+        self._joint_cb_count = 0
+        self._joint_cb_skipped = 0
 
         self.qos = QoSProfile(
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -219,16 +221,26 @@ class DeepcyboLiteAioRos2RobotNode(ROS2Node):
     # ------------------------------------------------------------------
     def joint_state_callback(self, msg: JointState) -> None:
         try:
+            self._joint_cb_count += 1
             now = time.time_ns()
+
+            if self.debug_joint and self._joint_cb_count % 100 == 1:
+                self.get_logger().info(
+                    f"[DEBUG-JOINT] cb #{self._joint_cb_count}, "
+                    f"skipped={self._joint_cb_skipped}, "
+                    f"since_last={(now - self.last_follow_send_time_ns) / 1e6:.0f}ms"
+                )
+
             if now - self.last_follow_send_time_ns < self.min_control_interval_ns:
+                self._joint_cb_skipped += 1
                 return
             self.last_follow_send_time_ns = now
 
             if self.debug_joint:
                 n = min(3, len(msg.position))
                 self.get_logger().info(
-                    f"[DEBUG-JOINT] recv {len(msg.name)} joints, first {n}: " +
-                    ", ".join(f"{msg.name[i]}={msg.position[i]:+.4f}" for i in range(n))
+                    f"[DEBUG-JOINT-PASS] #{self._joint_cb_count} "
+                    + ", ".join(f"{msg.name[i]}={msg.position[i]:+.4f}" for i in range(n))
                 )
 
             merged = self._vector_from_joint_state(msg, "follower")
@@ -239,9 +251,6 @@ class DeepcyboLiteAioRos2RobotNode(ROS2Node):
         except Exception as e:
             self.get_logger().error(f"JointState callback error: {e}")
 
-    # ------------------------------------------------------------------
-    # Action — /slave/remote_policy_controller/command (MITCommand)
-    # ------------------------------------------------------------------
     def command_callback(self, msg) -> None:
         try:
             now = time.time_ns()
