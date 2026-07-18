@@ -25,7 +25,7 @@ import numpy as np
 
 import logging_mp
 
-logger = logging_mp.get_logger(__name__)
+logger = logging_mp.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 维度常量

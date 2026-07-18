@@ -17,7 +17,7 @@ from .status import LEJUKuavoRos1RobotStatus  # 改为ROS1状态类（需确保s
 from .node import LEJUKuavoRos1Node, ros_spin_thread  # 导入ROS1节点和spin函数
 
 
-logger = logging_mp.get_logger(__name__)
+logger = logging_mp.getLogger(__name__)
 
 
 class LEJUKuavoRos1Robot(Robot):  # 类名改为ROS1标识

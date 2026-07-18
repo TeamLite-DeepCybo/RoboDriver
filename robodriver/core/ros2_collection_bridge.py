@@ -9,7 +9,7 @@ from std_msgs.msg import Bool
 
 from robodriver.core.coordinator import Coordinator
 
-logger = logging_mp.get_logger(__name__)
+logger = logging_mp.getLogger(__name__)
 
 
 class Ros2CollectionBridge(Node):

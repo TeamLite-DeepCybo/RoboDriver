@@ -16,7 +16,7 @@ from .status import DobotNova2Ros2RobotStatus
 from .node import DobotNova2Ros2RobotNode, ros_spin_thread
 
 
-logger = logging_mp.get_logger(__name__)
+logger = logging_mp.getLogger(__name__)
 
 
 

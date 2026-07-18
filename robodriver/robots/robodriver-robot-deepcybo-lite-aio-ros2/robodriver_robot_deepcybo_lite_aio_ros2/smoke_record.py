@@ -41,7 +41,7 @@ from .config import DEFAULT_DATA_ROOT, DeepcyboLiteAioRos2RobotConfig
 from .mock_recording import DeepcyboLiteMockRecordingNode
 from .robot import DeepcyboLiteAioRos2Robot
 
-logger = logging_mp.get_logger(__name__)
+logger = logging_mp.getLogger(__name__)
 
 
 def _default_output_root() -> Path:
@@ -239,7 +239,7 @@ def run_smoke_record(args: argparse.Namespace) -> Path:
 
 
 def main(argv: Iterable[str] | None = None) -> None:
-    logging_mp.basic_config(level=logging_mp.INFO)
+    logging_mp.basicConfig(level=logging_mp.INFO)
     args = build_arg_parser().parse_args(argv)
     output_root = run_smoke_record(args)
     print(output_root)

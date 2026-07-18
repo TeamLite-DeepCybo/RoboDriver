@@ -34,7 +34,7 @@ from robodriver_robot_deepcybo_lite_aio_ros2.config import (
 from robodriver_robot_deepcybo_lite_aio_ros2.robot import DeepcyboLiteAioRos2Robot
 
 
-logger = logging_mp.get_logger(__name__)
+logger = logging_mp.getLogger(__name__)
 
 
 def _default_output_root() -> Path:
@@ -94,7 +94,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    logging_mp.basic_config(level=logging_mp.INFO)
+    logging_mp.basicConfig(level=logging_mp.INFO)
     args = build_arg_parser().parse_args()
 
     os.environ.setdefault("ROS_LOG_DIR", "/tmp/ros_logs")

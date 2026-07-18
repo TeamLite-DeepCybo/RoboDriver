@@ -14,7 +14,7 @@ from .config import AgilexAlohaEEposeROS2RobotConfig
 from .node import AgilexAlohaEEposeROS2RobotNode
 
 
-logger = logging_mp.get_logger(__name__)
+logger = logging_mp.getLogger(__name__)
 
 
 class AgilexAlohaEEposeROS2Robot(Robot):

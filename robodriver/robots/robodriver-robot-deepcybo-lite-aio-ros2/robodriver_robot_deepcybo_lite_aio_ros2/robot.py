@@ -12,7 +12,7 @@ from .config import DeepcyboLiteAioRos2RobotConfig
 from .node import STATE_DIM, DeepcyboLiteAioRos2RobotNode
 from .status import DeepcyboLiteAioRos2RobotStatus
 
-logger = logging_mp.get_logger(__name__)
+logger = logging_mp.getLogger(__name__)
 
 LEADER_COMP = "leader_arms"
 FOLLOWER_COMP = "follower_arms"

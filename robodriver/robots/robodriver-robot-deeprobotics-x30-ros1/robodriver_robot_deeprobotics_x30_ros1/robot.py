@@ -14,7 +14,7 @@ from .config import DeeproboticsX30Ros1RobotConfig
 from .node import DeeproboticsX30Ros1Node
 
 
-logger = logging_mp.get_logger(__name__)
+logger = logging_mp.getLogger(__name__)
 
 
 class DeeproboticsX30Ros1Robot(Robot):

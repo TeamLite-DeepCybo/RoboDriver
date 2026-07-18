@@ -17,7 +17,7 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPo
 import logging_mp
 
 CONNECT_TIMEOUT_FRAME = 10 
-logger = logging_mp.get_logger(__name__)
+logger = logging_mp.getLogger(__name__)
 
 class OPENARMRos2RobotNode(ROS2Node):
 

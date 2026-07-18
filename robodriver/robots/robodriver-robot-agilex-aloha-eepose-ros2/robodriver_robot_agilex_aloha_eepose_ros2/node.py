@@ -16,7 +16,7 @@ from geometry_msgs.msg import PoseStamped
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
 
 
-logger = logging_mp.get_logger(__name__)
+logger = logging_mp.getLogger(__name__)
 CONNECT_TIMEOUT_FRAME = 10
 
 

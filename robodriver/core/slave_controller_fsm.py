@@ -28,7 +28,7 @@ from bar_msgs.msg import StandbyState
 
 import logging_mp
 
-logger = logging_mp.get_logger(__name__)
+logger = logging_mp.getLogger(__name__)
 
 MODE_CONTROLLERS = (
     'zero_torque_controller',
@@ -36,6 +36,12 @@ MODE_CONTROLLERS = (
     'standby_controller',
     'remote_policy_controller',
 )
+
+# 基础设施控制器 — 始终保持 active，不参与切换
+PROTECTED_CONTROLLERS = (
+    "joint_state_broadcaster",
+)
+
 
 STANDBY_TOPIC = '/slave/standby_controller/state'
 
@@ -123,7 +129,10 @@ class SlaveControllerFsm:
         return None
 
     def _switch_to(self, target: str) -> None:
-        """STRICT 语义切换控制器。"""
+        """STRICT 语义切换控制器。
+
+        当无活跃模式控制器时，列出全部活跃控制器并停用后再激活 target。
+        """
         if not self._switch_cli.wait_for_service(timeout_sec=5.0):
             raise RuntimeError(f'SwitchController service not available at {self.CM}')
 
@@ -131,27 +140,63 @@ class SlaveControllerFsm:
         if active == target:
             logger.info(f'[FSM] {target} already active')
             return
-        if active is None:
-            raise RuntimeError(f'[FSM] no active mode controller, cannot switch to {target}')
 
         if target == 'standby_controller':
             self._standby_msg = None
             self._standby_activated_at = self._node.get_clock().now()
 
-        logger.info(f'[FSM] {active} -> {target}')
-        req = SwitchController.Request()
-        req.deactivate_controllers = [active]
-        req.activate_controllers = [target]
-        req.strictness = SwitchController.Request.STRICT
-        req.activate_asap = True
+        if active is None:
+            # 无模式控制器活跃，但 controller_manager 可能有其他活跃控制器
+            # → 找出全部活跃控制器并停用，再激活 target
+            logger.info(f'[FSM] (none) -> {target} (resolving all active controllers...)')
+            for attempt in range(20):  # 最多等 10s（首次启动时序竞争）
+                all_active = self._all_active_controllers()
+                req = SwitchController.Request()
+                req.deactivate_controllers = all_active
+                req.activate_controllers = [target]
+                req.strictness = SwitchController.Request.STRICT
+                req.activate_asap = True
+                future = self._switch_cli.call_async(req)
+                rclpy.spin_until_future_complete(self._node, future, timeout_sec=2.0)
+                if future.done():
+                    resp = future.result()
+                    if resp.ok:
+                        logger.info(
+                            f'[FSM] {all_active or "[]"} -> {target} '
+                            f'(attempt {attempt + 1})'
+                        )
+                        return
+                logger.info(
+                    f'[FSM] retry {attempt + 1}/20: '
+                    f'switch rejected (active={all_active}), waiting 0.5s...'
+                )
+                time.sleep(0.5)
+            raise RuntimeError(f'[FSM] failed to activate {target} after 20 retries')
+        else:
+            logger.info(f'[FSM] {active} -> {target}')
+            req = SwitchController.Request()
+            req.deactivate_controllers = [active]
+            req.activate_controllers = [target]
+            req.strictness = SwitchController.Request.STRICT
+            req.activate_asap = True
+            future = self._switch_cli.call_async(req)
+            rclpy.spin_until_future_complete(self._node, future, timeout_sec=10.0)
+            if not future.done():
+                raise RuntimeError(f'[FSM] switch to {target} timed out')
+            resp = future.result()
+            if not resp.ok:
+                raise RuntimeError(f'[FSM] switch rejected: {active} -> {target}')
 
-        future = self._switch_cli.call_async(req)
-        rclpy.spin_until_future_complete(self._node, future, timeout_sec=10.0)
+    def _all_active_controllers(self) -> list:
+        """返回 controller_manager 中全部 active 状态的控制器名（不限模式控制器）。"""
+        if not self._list_cli.wait_for_service(timeout_sec=2.0):
+            return []
+        future = self._list_cli.call_async(ListControllers.Request())
+        rclpy.spin_until_future_complete(self._node, future, timeout_sec=2.0)
         if not future.done():
-            raise RuntimeError(f'[FSM] switch to {target} timed out')
+            return []
         resp = future.result()
-        if not resp.ok:
-            raise RuntimeError(f'[FSM] switch rejected: {active} -> {target}')
+        return [c.name for c in resp.controller if c.state == "active" and c.name not in PROTECTED_CONTROLLERS]
 
     def _wait_standby(self, timeout_s: float = 60.0) -> None:
         """等待 standby ramp 完成。"""
@@ -238,6 +283,41 @@ class SlaveControllerFsm:
         print(f'\n  [READY] 从臂 standby 到位，等待推理服务端')
         return self.state
 
+    def _publish_hold_to_remote_policy(self) -> None:
+        """向 /slave/remote_policy_controller/command 发布当前位置保持指令。
+
+        在切换控制器之前调用，防止 remote_policy_controller 激活后读到空指令
+        导致机械臂垂落。
+        """
+        from bar_msgs.msg import MITCommand
+        from robodriver_robot_deepcybo_lite_aio_ros2.config import (
+            LITE_JOINT_NAMES,
+        )
+
+        node = self._node
+        state_dim = len(LITE_JOINT_NAMES)
+
+        recv = getattr(node, 'recv_follower', {})
+        vec = recv.get('follower_arms')
+        if vec is None:
+            logger.warning('[FSM] 无 follower 关节数据，跳过 hold 指令')
+            return
+
+        msg = MITCommand()
+        msg.header.stamp = node.get_clock().now().to_msg()
+        msg.joint_names = list(LITE_JOINT_NAMES)
+        msg.position = [float(v) for v in vec[:state_dim]]
+        msg.velocity = [0.0] * state_dim
+        msg.effort = [0.0] * state_dim
+        msg.stiffness = [node.command_stiffness] * state_dim
+        msg.damping = [node.command_damping] * state_dim
+        node.publisher_command.publish(msg)
+
+        logger.info(
+            f'[FSM] hold 指令已发布 → /slave/remote_policy_controller/command '
+            f'({state_dim} joints, stiffness={node.command_stiffness})'
+        )
+
     def wait_and_enter_remote(self, server_url: str) -> FsmState:
         """READY → REMOTE_POLICY: 等待服务端就绪 + 操作员确认。"""
         health_url = f'{server_url.rstrip("/")}/api/v1/health'
@@ -256,7 +336,9 @@ class SlaveControllerFsm:
                 print('\n  [READY] 用户取消')
                 return self.state
 
+        # ---- 保护：先切控制器再发 hold（subscriber 已存在才能收到） ----
         self._switch_to('remote_policy_controller')
+        self._publish_hold_to_remote_policy()
         self.state = FsmState.REMOTE_POLICY
         print(f'\n  [REMOTE_POLICY] 从臂已就绪，开始接收推理指令\n')
         return self.state

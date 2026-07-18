@@ -15,7 +15,7 @@ from .config import UnitreeG1RobotConfig
 from .node import UnitreeG1Node
 
 
-logger = logging_mp.get_logger(__name__)
+logger = logging_mp.getLogger(__name__)
 
 
 class UnitreeG1Robot(Robot):

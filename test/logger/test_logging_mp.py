@@ -5,7 +5,7 @@ import logging_mp
 
 def worker(name, level=None):
     # 如果没有设置 level，就使用全局默认等级
-    logger = logging_mp.get_logger(name, level=level)
+    logger = logging_mp.getLogger(name, level=level)
 
     logger.debug(f"[{name}] debug —— 调试细节")
     logger.info(f"[{name}] info —— 普通信息")
@@ -18,9 +18,9 @@ def worker(name, level=None):
 
 if __name__ == "__main__":
     # 全局默认等级：INFO（即不显示 debug）
-    logging_mp.basic_config(level=logging_mp.INFO)
+    logging_mp.basicConfig(level=logging_mp.INFO)
 
-    main_logger = logging_mp.get_logger("main")
+    main_logger = logging_mp.getLogger("main")
     main_logger.info("主进程启动")
 
     # 启动多个子进程：

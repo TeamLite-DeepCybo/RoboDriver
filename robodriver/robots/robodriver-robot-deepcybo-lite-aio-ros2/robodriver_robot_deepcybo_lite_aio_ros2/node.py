@@ -44,7 +44,7 @@ STATE_DIM = len(LITE_JOINT_NAMES)  # 16
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 
-logger = logging_mp.get_logger(__name__)
+logger = logging_mp.getLogger(__name__)
 
 
 class JointVectorError(Exception):
@@ -79,7 +79,7 @@ class DeepcyboLiteAioRos2RobotNode(ROS2Node):
         self.command_damping = float(command_damping)
 
         self.qos = QoSProfile(
-            durability=DurabilityPolicy.VOLATILE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=10,
