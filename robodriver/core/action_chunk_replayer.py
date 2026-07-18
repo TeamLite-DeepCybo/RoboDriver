@@ -193,7 +193,9 @@ class ActionChunkPublisher:
                 self.frames_sent += 1
                 self._last_action_dict = action_dict
             except Exception:
-                logger.exception(
+                if not self._running:
+                    break  # 正常关闭中
+                logger.warning(
                     f"[ActionChunkPublisher] send_action failed at "
                     f"chunk_index={self._chunk_index - 1}"
                 )

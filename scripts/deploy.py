@@ -26,6 +26,7 @@ from typing import Optional
 import numpy as np
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.signals import SignalHandlerOptions
 
 import logging_mp
 
@@ -85,7 +86,7 @@ async def _run_inference_loop(
 
 
 async def main(server_url: str, prompt: str, fps: int, chunk_size: int, auto_mode: bool = False) -> None:
-    rclpy.init()
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     executor = MultiThreadedExecutor()
 
     # ---- 机器人 ----
@@ -106,7 +107,12 @@ async def main(server_url: str, prompt: str, fps: int, chunk_size: int, auto_mod
     # ---- FSM ----
     fsm = SlaveControllerFsm(robot.get_node(), auto_mode=auto_mode)
 
-    spin_thread = threading.Thread(target=executor.spin, daemon=True)
+    def _spin_safe():
+        try:
+            executor.spin()
+        except Exception as e:
+            logger.error(f'[Executor] spin crashed: {type(e).__name__}: {e}', exc_info=True)
+    spin_thread = threading.Thread(target=_spin_safe, daemon=True)
     spin_thread.start()
 
     # ---- 连接机器人 ----

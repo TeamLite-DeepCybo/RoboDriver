@@ -4,6 +4,7 @@ from typing import Any
 
 import logging_mp
 import numpy as np
+import rclpy
 from lerobot.cameras import make_cameras_from_configs
 from lerobot.robots.robot import Robot
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
@@ -246,10 +247,13 @@ class DeepcyboLiteAioRos2Robot(Robot):
             ordered.append(float(action[key]))
 
         goal_joint_numpy = np.array(ordered, dtype=np.float32)
+        if not rclpy.ok():
+            raise RuntimeError("rclpy context shut down, cannot send action")
         try:
             self.robot_ros2_node.ros_replay(goal_joint_numpy)
         except Exception as e:
-            logger.error(f"Failed to send action: {e}")
+            if rclpy.ok():
+                logger.error(f"Failed to send action: {e}")
             raise
 
     def update_status(self) -> str:
