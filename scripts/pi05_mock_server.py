@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import sys
+import sys
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -34,8 +36,8 @@ from pydantic import BaseModel, Field
 STATE_DIM = 16
 ACTION_DIM = 128
 ROBOT_ACTION_DIM = 16
-CHUNK_SIZE = 32      # 固定 32 步线性插值
-MOCK_DELAY_MS = 150  # 固定 150ms
+CHUNK_SIZE = 50      # 固定 50 帧 chunk
+MOCK_DELAY_MS = 1500  # 固定 1500ms
 
 # ---------------------------------------------------------------------------
 # 图片展示窗口
@@ -104,6 +106,7 @@ app = FastAPI(title="PI05 Mock Inference Server — Loopback Test", version="0.2
 _start_time: float = time.time()
 _request_count: int = 0
 _display_started: bool = False
+_interpolation_done: bool = False  # 首次插值完成后切换为原地保持
 
 
 # ---------------------------------------------------------------------------
@@ -176,15 +179,13 @@ def _decode_image(b64_str: str) -> Optional[np.ndarray]:
 def _generate_interpolation_chunk(
     state: np.ndarray,
 ) -> np.ndarray:
-    """当前位置 → 全身关节零位的 32 步线性插值。
+    """首次: 当前位置 → 全身关节零位的线性插值 (CHUNK_SIZE 步)。
 
     Args:
         state: (16,) float32 当前关节状态
 
     Returns:
-        (32, 128) float32 action chunk
-          - 前 16 维: 32 步线性插值轨迹
-          - 后 112 维: 全零
+        (CHUNK_SIZE, 128) float32 action chunk
     """
     state = np.asarray(state, dtype=np.float32).flatten()
     if state.shape[0] < ROBOT_ACTION_DIM:
@@ -192,15 +193,13 @@ def _generate_interpolation_chunk(
         padded[: state.shape[0]] = state
         state = padded
 
-    zero_pos = np.zeros(ROBOT_ACTION_DIM, dtype=np.float32)
     chunk = np.zeros((CHUNK_SIZE, ACTION_DIM), dtype=np.float32)
-
+    zero_pos = np.zeros(ROBOT_ACTION_DIM, dtype=np.float32)
     for i in range(CHUNK_SIZE):
-        t = i / max(CHUNK_SIZE - 1, 1)  # 0.0 → 1.0
-        # 线性插值: start + (end - start) * t  =  state + (0 - state) * t
-        chunk[i, :ROBOT_ACTION_DIM] = state + (zero_pos - state) * t
+        t = i / max(CHUNK_SIZE - 1, 1)
+        chunk[i, :ROBOT_ACTION_DIM] = state[:ROBOT_ACTION_DIM] + (zero_pos - state[:ROBOT_ACTION_DIM]) * t
 
-    # 后 112 维保持为 0
+    print(f"[mock] 首次插值: state={[round(v,4) for v in state[:3].tolist()]}... -> zero ({CHUNK_SIZE} steps)", flush=True)
     return chunk
 
 
@@ -222,7 +221,7 @@ async def health() -> Dict[str, Any]:
 
 @app.post("/api/v1/infer", response_model=InferenceResponse)
 async def infer(req: InferenceRequest) -> InferenceResponse:
-    global _request_count, _display_started
+    global _request_count, _display_started, _interpolation_done
 
     t0 = time.perf_counter()
     _request_count += 1
@@ -231,8 +230,10 @@ async def infer(req: InferenceRequest) -> InferenceResponse:
     if not _display_started:
         _display_started = True
         threading.Thread(target=_display_thread, daemon=True).start()
+        print("[mock] display thread started", flush=True)
 
     images_raw = req.observation.images
+    print(f"[mock] #{_request_count} images received: head={bool(getattr(images_raw, 'image_head', ''))}, wrist_l={bool(getattr(images_raw, 'image_wrist_left', ''))}, wrist_r={bool(getattr(images_raw, 'image_wrist_right', ''))}", flush=True)
     for key in ("image_head", "image_wrist_left", "image_wrist_right"):
         b64_str = getattr(images_raw, key, "")
         img = _decode_image(b64_str)
@@ -250,22 +251,32 @@ async def infer(req: InferenceRequest) -> InferenceResponse:
             metadata=ResponseMetadata(timestamp_unix=time.time()),
         )
 
-    # ---- 2. 模拟推理延迟 150ms ----
+    # ---- 2. 模拟推理延迟 ----
     time.sleep(MOCK_DELAY_MS / 1000.0)
 
-    # ---- 3. 生成 32 步线性插值 chunk ----
-    action_chunk = _generate_interpolation_chunk(state)
+    # ---- 3. 生成 action chunk ----
+    was_first = not _interpolation_done
+    if not _interpolation_done:
+        # 首次：当前位置 → 零位线性插值，执行一次
+        action_chunk = _generate_interpolation_chunk(state)
+        _interpolation_done = True
+    else:
+        # 之后：原地保持，复制当前关节角作为整个 chunk
+        state_padded = np.zeros(ACTION_DIM, dtype=np.float32)
+        state_padded[: min(state.shape[0], ROBOT_ACTION_DIM)] = state[:ROBOT_ACTION_DIM]
+        action_chunk = np.tile(state_padded, (CHUNK_SIZE, 1))
 
     dt_ms = (time.perf_counter() - t0) * 1000.0
 
     # ---- 4. 返回 ----
-    print(
-        f"[mock] #{_request_count} request_id={req.request_id} "
-        f"prompt='{req.prompt[:40]}' "
+    mode = "INTERP" if was_first else "HOLD"
+    msg = (
+        f"[mock] #{_request_count} {mode} request_id={req.request_id} "
         f"state[:3]={[round(v,4) for v in state[:3].tolist()]}... "
         f"chunk=({CHUNK_SIZE}, {ACTION_DIM}) "
         f"inference={dt_ms:.1f}ms"
     )
+    print(msg, flush=True)
 
     return InferenceResponse(
         request_id=req.request_id,
@@ -280,7 +291,6 @@ async def infer(req: InferenceRequest) -> InferenceResponse:
             timestamp_unix=time.time(),
         ),
     )
-
 
 # ---------------------------------------------------------------------------
 # CLI
