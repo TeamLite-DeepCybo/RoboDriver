@@ -198,6 +198,17 @@ class SlaveControllerFsm:
         resp = future.result()
         return [c.name for c in resp.controller if c.state == "active" and c.name not in PROTECTED_CONTROLLERS]
 
+    def _all_controllers(self) -> list[str]:
+        """返回 controller_manager 中全部控制器名（含状态）。"""
+        if not self._list_cli.wait_for_service(timeout_sec=2.0):
+            return []
+        future = self._list_cli.call_async(ListControllers.Request())
+        rclpy.spin_until_future_complete(self._node, future, timeout_sec=2.0)
+        if not future.done():
+            return []
+        resp = future.result()
+        return [f"{c.name}({c.state})" for c in resp.controller]
+
     def _wait_standby(self, timeout_s: float = 60.0) -> None:
         """等待 standby ramp 完成。"""
         logger.info('[FSM] waiting for standby ramp to finish...')
@@ -338,6 +349,16 @@ class SlaveControllerFsm:
 
         # ---- 保护：先切控制器再发 hold（subscriber 已存在才能收到） ----
         self._switch_to('remote_policy_controller')
+
+        # 诊断：切换后列出所有控制器状态
+        all_ctrl = self._all_controllers()
+        logger.info(f'[FSM] post-switch all controllers: {all_ctrl}')
+        broadcaster_active = any(
+            'joint_state_broadcaster' in c and 'active' in c for c in all_ctrl
+        )
+        if not broadcaster_active:
+            logger.error('[FSM] joint_state_broadcaster NOT active after switch!')
+
         self._publish_hold_to_remote_policy()
         self.state = FsmState.REMOTE_POLICY
         print(f'\n  [REMOTE_POLICY] 从臂已就绪，开始接收推理指令\n')
