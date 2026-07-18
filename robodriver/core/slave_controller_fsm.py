@@ -122,7 +122,7 @@ class SlaveControllerFsm:
         # 轮询等待（避免破坏 MultiThreadedExecutor）
         _dl = time.time() + 2.0
         while not future.done() and time.time() < _dl:
-            time.sleep(0.01)
+            rclpy.spin_once(self._node, timeout_sec=0.01)
         if not future.done():
             raise RuntimeError(f'service call timed out after {2.0}s')
         resp = future.result()
@@ -163,7 +163,7 @@ class SlaveControllerFsm:
                 # 轮询等待（避免破坏 MultiThreadedExecutor）
                 _dl = time.time() + 2.0
                 while not future.done() and time.time() < _dl:
-                    time.sleep(0.01)
+                    rclpy.spin_once(self._node, timeout_sec=0.01)
                 if not future.done():
                     raise RuntimeError(f'service call timed out after {2.0}s')
                 resp = future.result()
@@ -190,7 +190,7 @@ class SlaveControllerFsm:
             # 轮询等待（避免破坏 MultiThreadedExecutor）
             _dl = time.time() + 10.0
             while not future.done() and time.time() < _dl:
-                time.sleep(0.01)
+                rclpy.spin_once(self._node, timeout_sec=0.01)
             if not future.done():
                 raise RuntimeError(f'service call timed out after {10.0}s')
             resp = future.result()
@@ -205,7 +205,7 @@ class SlaveControllerFsm:
         # 轮询等待（避免破坏 MultiThreadedExecutor）
         _dl = time.time() + 2.0
         while not future.done() and time.time() < _dl:
-            time.sleep(0.01)
+            rclpy.spin_once(self._node, timeout_sec=0.01)
         if not future.done():
             raise RuntimeError(f'service call timed out after {2.0}s')
         resp = future.result()
@@ -219,7 +219,7 @@ class SlaveControllerFsm:
         # 轮询等待（避免破坏 MultiThreadedExecutor）
         _dl = time.time() + 2.0
         while not future.done() and time.time() < _dl:
-            time.sleep(0.01)
+            rclpy.spin_once(self._node, timeout_sec=0.01)
         if not future.done():
             raise RuntimeError(f'service call timed out after {2.0}s')
         resp = future.result()
