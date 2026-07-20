@@ -11,6 +11,7 @@ Provenance values (float, stored in the observation.provenance feature):
 """
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Iterator
 
@@ -21,7 +22,11 @@ MEASURED = 0.0
 INTERPOLATED = 1.0
 UNFILLABLE = 2.0
 
-STATE_DIM = 23
+# Full observation.state width (16 eef/gripper dims + 7 quality dims). NOT the
+# same thing as config.STATE_DIM, which is 16 (eef/gripper dims only, the
+# adapter's policy-input width) -- deliberately distinct names so the two
+# meanings can never be confused within this package.
+FULL_STATE_DIM = 23
 ACTION_DIM = 16
 
 
@@ -31,7 +36,13 @@ class ArmLayout:
 
     Mirrors the adapter's feature-name contract (config.EEF_FEATURE_NAMES +
     QUALITY_FEATURE_NAMES); config.py itself needs the lerobot env, so the
-    indices are restated here and pinned by test_layout_matches_feature_name_contract.
+    indices are restated here. The real guard against layout drift is
+    tests/test_real_episode_e2e.py::test_layout_matches_recorded_feature_names,
+    which reads the actual recorded meta/info.json feature names and checks
+    ARM_LAYOUT against them. tests/test_smoothing.py::
+    test_layout_matches_feature_name_contract only pins these hardcoded
+    indices against hardcoded literals -- it never touches real data, so it
+    cannot detect a genuine recorder layout change.
     """
     pos: slice      # x, y, z
     quat: slice     # qx, qy, qz, qw (scipy order)
@@ -78,7 +89,13 @@ def smooth_arm(
     quat_out = np.array(quat, copy=True)
     prov = np.full(len(times), UNFILLABLE, dtype=np.float32)
     prov[anchors] = MEASURED
-    if int(anchors.sum()) < 2:
+    n_anchors = int(anchors.sum())
+    if n_anchors < 2:
+        warnings.warn(
+            f"smooth_arm: only {n_anchors} anchor(s) in {len(times)} frames -- "
+            "nothing to bracket, all non-anchor frames left UNFILLABLE",
+            stacklevel=2,
+        )
         return pos_out, quat_out, prov
 
     for a, b in bracketed_runs(anchors):
@@ -111,9 +128,9 @@ def smooth_state(
     """
     state = np.asarray(state)
     times = np.asarray(times, dtype=float)
-    if state.ndim != 2 or state.shape[1] != STATE_DIM:
+    if state.ndim != 2 or state.shape[1] != FULL_STATE_DIM:
         raise ValueError(
-            f"state must be (N, {STATE_DIM}), got {state.shape}"
+            f"state must be (N, {FULL_STATE_DIM}), got {state.shape}"
         )
     if len(times) != len(state):
         raise ValueError("times and state length mismatch")
@@ -151,8 +168,14 @@ class ArmCoverage:
     measured: int
     interpolated: int
     unfillable: int
-    gap_hist: dict[int, int]     # filled-gap length in frames -> count
-    longest_gap_s: float         # longest anchor-to-anchor span with a gap
+    filled_gap_hist: dict[int, int]     # filled-gap length in frames -> count
+    unfilled_gap_hist: dict[int, int]   # unfilled (rejected) gap length -> count
+    longest_filled_gap_s: float         # longest anchor-to-anchor span that WAS filled
+    longest_unfilled_gap_s: float       # longest bracketed span that was REJECTED
+    # (e.g. by --max-gap-s) and left UNFILLABLE; this is the number that
+    # tells a user how much to raise --max-gap-s by. Leading/trailing
+    # unbracketed runs are not bracketed spans and are not counted in either
+    # histogram or longest value, only in `unfillable`.
 
 
 def arm_coverage(
@@ -160,18 +183,26 @@ def arm_coverage(
 ) -> ArmCoverage:
     times = np.asarray(times, dtype=float)
     anchors = np.asarray(anchors, dtype=bool)
-    hist: dict[int, int] = {}
-    longest = 0.0
+    filled_hist: dict[int, int] = {}
+    unfilled_hist: dict[int, int] = {}
+    longest_filled = 0.0
+    longest_unfilled = 0.0
     for a, b in bracketed_runs(anchors):
-        longest = max(longest, float(times[b] - times[a]))
+        span = float(times[b] - times[a])
+        n_frames = b - a - 1
         if (provenance[a + 1:b] == INTERPOLATED).all():
-            n_frames = b - a - 1
-            hist[n_frames] = hist.get(n_frames, 0) + 1
+            filled_hist[n_frames] = filled_hist.get(n_frames, 0) + 1
+            longest_filled = max(longest_filled, span)
+        else:
+            unfilled_hist[n_frames] = unfilled_hist.get(n_frames, 0) + 1
+            longest_unfilled = max(longest_unfilled, span)
     return ArmCoverage(
         n=len(times),
         measured=int((provenance == MEASURED).sum()),
         interpolated=int((provenance == INTERPOLATED).sum()),
         unfillable=int((provenance == UNFILLABLE).sum()),
-        gap_hist=hist,
-        longest_gap_s=longest,
+        filled_gap_hist=filled_hist,
+        unfilled_gap_hist=unfilled_hist,
+        longest_filled_gap_s=longest_filled,
+        longest_unfilled_gap_s=longest_unfilled,
     )

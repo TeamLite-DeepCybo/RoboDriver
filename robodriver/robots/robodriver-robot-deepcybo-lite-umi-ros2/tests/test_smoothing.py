@@ -182,5 +182,44 @@ def test_arm_coverage_counts_and_histogram():
     assert cov.measured == 27
     assert cov.interpolated == 3
     assert cov.unfillable == 0
-    assert cov.gap_hist == {2: 1, 1: 1}
-    assert cov.longest_gap_s == pytest.approx(t[7] - t[4])
+    assert cov.filled_gap_hist == {2: 1, 1: 1}
+    assert cov.longest_filled_gap_s == pytest.approx(t[7] - t[4])
+    # no unfilled gaps at all in this arm
+    assert cov.unfilled_gap_hist == {}
+    assert cov.longest_unfilled_gap_s == 0.0
+
+
+def test_arm_coverage_separates_filled_and_unfilled_gaps():
+    """Fix 3/6: an arm with BOTH a fillable gap and an over-long unfillable
+    gap must report the two histograms and longest values distinctly --
+    the whole point being that a user reading the unfilled longest figure
+    knows how much to raise --max-gap-s by, without it being shadowed by
+    the (much smaller) longest FILLED figure."""
+    t, s = _state()
+    s[5:7, 16] = 0.0        # 2-frame gap (fillable, span = t[7]-t[4])
+    s[15:23, 16] = 0.0      # 8-frame gap (over-long, anchors t[14]..t[23])
+    anchors = s[:, 16] > 0.5
+    _, prov = smooth_state(t, s, max_gap_s=0.25)
+    cov = arm_coverage(t, anchors, prov[:, 0])
+
+    assert cov.n == 30
+    assert cov.measured == int(anchors.sum())
+    assert cov.interpolated == 2          # only the 2-frame gap got filled
+    assert cov.unfillable == 8            # the 8-frame gap stayed UNFILLABLE
+
+    assert cov.filled_gap_hist == {2: 1}
+    assert cov.longest_filled_gap_s == pytest.approx(t[7] - t[4])
+
+    assert cov.unfilled_gap_hist == {8: 1}
+    assert cov.longest_unfilled_gap_s == pytest.approx(t[23] - t[14])
+    assert cov.longest_unfilled_gap_s > cov.longest_filled_gap_s
+
+
+def test_smooth_arm_warns_when_fewer_than_two_anchors():
+    """Fix 5 (spec Error handling): an arm with <2 anchors has nothing to
+    bracket and must emit a prominent warning, not fail silently."""
+    t, pos, quat = _traj(n=5)
+    anchors = np.zeros(5, dtype=bool)
+    anchors[2] = True
+    with pytest.warns(UserWarning, match="nothing to bracket"):
+        smooth_arm(t, pos, quat, anchors, max_gap_s=1.0)

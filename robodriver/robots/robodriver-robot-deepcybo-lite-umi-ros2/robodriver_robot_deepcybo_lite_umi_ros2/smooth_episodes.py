@@ -273,12 +273,18 @@ import tempfile
 USABLE_KEEP_THRESHOLD = 0.90  # matches the README's >90% coverage target
 
 
-def format_report(results: list[EpisodeResult], fps: int) -> str:
+def format_report(results: list[EpisodeResult]) -> str:
     """Per-episode/per-arm coverage report (spec §CLI).
 
     'usable' is a lower bound: n minus the WORST arm's unfillable count.
     (Exact per-frame overlap would need provenance masks in EpisodeResult;
     the worst-arm bound is sufficient for the KEEP/REVIEW decision.)
+
+    Filled and unfilled gaps are reported on separate lines so the two
+    "longest" figures can never be conflated: `longest filled` is the
+    biggest gap the smoother actually closed; `longest unfilled` (only
+    printed when there are unfilled gaps) is the biggest bracketed span it
+    REJECTED -- the number that tells a user how much to raise --max-gap-s.
     """
     lines: list[str] = []
     for res in results:
@@ -286,17 +292,26 @@ def format_report(results: list[EpisodeResult], fps: int) -> str:
         n = next(iter(res.coverage.values())).n
         for arm in ("left", "right"):
             c = res.coverage[arm]
-            hist = ", ".join(
-                f"{cnt}x{ln}f" for ln, cnt in sorted(c.gap_hist.items())
+            filled_hist = ", ".join(
+                f"{cnt}x{ln}f" for ln, cnt in sorted(c.filled_gap_hist.items())
             )
             pct = 100.0 * c.measured / max(c.n, 1)
             lines.append(
                 f"  {arm:<7} measured {c.measured}/{c.n} ({pct:.1f}%)"
                 f"  interpolated {c.interpolated}  unfillable {c.unfillable}"
             )
-            if hist:
+            if filled_hist:
                 lines.append(
-                    f"          gaps: {hist}    longest {c.longest_gap_s:.3f}s"
+                    f"          gaps: {filled_hist}    "
+                    f"longest filled {c.longest_filled_gap_s:.3f}s"
+                )
+            if c.unfilled_gap_hist:
+                unfilled_hist = ", ".join(
+                    f"{cnt}x{ln}f" for ln, cnt in sorted(c.unfilled_gap_hist.items())
+                )
+                lines.append(
+                    f"          unfilled gaps: {unfilled_hist}    "
+                    f"longest unfilled {c.longest_unfilled_gap_s:.3f}s"
                 )
         worst_unfillable = max(c.unfillable for c in res.coverage.values())
         usable = n - worst_unfillable  # lower bound (arms' gaps may overlap)
@@ -338,16 +353,13 @@ def main(argv: list[str] | None = None) -> int:
     if out_arg is None:
         out_arg = Path(tempfile.gettempdir()) / "smooth_episodes_dry_run_unused"
 
-    info = json.loads(
-        (args.root / "meta" / "info.json").read_text(encoding="utf-8")
-    )
     results = smooth_dataset(
         args.root, out_arg, args.max_gap_s,
         link_images=args.link_images,
         overwrite=args.overwrite,
         dry_run=args.dry_run,
     )
-    print(format_report(results, fps=info["fps"]))
+    print(format_report(results))
     if args.dry_run:
         print("\n(dry run: nothing written)")
     else:

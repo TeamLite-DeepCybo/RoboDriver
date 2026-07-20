@@ -9,6 +9,7 @@ interpolated/unfillable counts hold, and — the part a no-op "smoother"
 would fail — interpolated frames actually differ from the raw frozen-hold
 values they started from, per arm.
 """
+import json
 from pathlib import Path
 
 import numpy as np
@@ -17,7 +18,7 @@ import pytest
 
 from robodriver_robot_deepcybo_lite_umi_ros2.smooth_episodes import main
 from robodriver_robot_deepcybo_lite_umi_ros2.smoothing import (
-    INTERPOLATED, MEASURED, UNFILLABLE,
+    ARM_LAYOUT, INTERPOLATED, MEASURED, UNFILLABLE,
 )
 
 REAL = Path(__file__).resolve().parents[4].parent / "umi_real_rec_2026-07-15"
@@ -25,6 +26,33 @@ REAL = Path(__file__).resolve().parents[4].parent / "umi_real_rec_2026-07-15"
 pytestmark = pytest.mark.skipif(
     not REAL.is_dir(), reason=f"real recording not found at {REAL}"
 )
+
+
+def test_layout_matches_recorded_feature_names():
+    """Fix 1 (real layout-drift guard): tests/test_smoothing.py::
+    test_layout_matches_feature_name_contract only asserts hardcoded slices
+    equal hardcoded literals -- it never reads real data, so it cannot
+    detect a genuine recorder layout change. This test reads the ACTUAL
+    recorded meta/info.json feature names and checks ARM_LAYOUT's indices
+    against them: if the recorder ever emitted a different column order,
+    this is what would catch it (instead of smooth_arm silently Slerp-ing
+    positions / lerp-ing quaternion components against the wrong columns).
+    """
+    info = json.loads((REAL / "meta" / "info.json").read_text(encoding="utf-8"))
+    names = info["features"]["observation.state"]["names"]
+
+    L, R = ARM_LAYOUT["left"], ARM_LAYOUT["right"]
+
+    assert names[L.pos] == ["left_eef_x.pos", "left_eef_y.pos", "left_eef_z.pos"]
+    assert names[L.quat] == [
+        "left_eef_qx.pos", "left_eef_qy.pos", "left_eef_qz.pos", "left_eef_qw.pos",
+    ]
+    assert names[R.pos] == ["right_eef_x.pos", "right_eef_y.pos", "right_eef_z.pos"]
+    assert names[R.quat] == [
+        "right_eef_qx.pos", "right_eef_qy.pos", "right_eef_qz.pos", "right_eef_qw.pos",
+    ]
+    assert names[L.tracked] == "left_tracked.flag"
+    assert names[R.tracked] == "right_tracked.flag"
 
 
 def test_real_episode_smooths_clean(tmp_path):

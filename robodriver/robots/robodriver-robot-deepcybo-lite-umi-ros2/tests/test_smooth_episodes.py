@@ -104,8 +104,10 @@ def test_measured_anchor_mismatch_raises(raw_ds, tmp_path, monkeypatch):
             measured=cov.measured + 1,  # disagrees with true anchor count
             interpolated=cov.interpolated,
             unfillable=cov.unfillable,
-            gap_hist=cov.gap_hist,
-            longest_gap_s=cov.longest_gap_s,
+            filled_gap_hist=cov.filled_gap_hist,
+            unfilled_gap_hist=cov.unfilled_gap_hist,
+            longest_filled_gap_s=cov.longest_filled_gap_s,
+            longest_unfilled_gap_s=cov.longest_unfilled_gap_s,
         )
 
     monkeypatch.setattr(smooth_episodes_mod, "arm_coverage", fake_arm_coverage)
@@ -334,18 +336,25 @@ def test_format_report_shape():
     from robodriver_robot_deepcybo_lite_umi_ros2.smooth_episodes import EpisodeResult
     res = [EpisodeResult(episode_index=0, coverage={
         "left": ArmCoverage(n=240, measured=178, interpolated=62, unfillable=0,
-                            gap_hist={1: 3, 4: 2, 7: 1}, longest_gap_s=0.2333),
+                            filled_gap_hist={1: 3, 4: 2, 7: 1},
+                            unfilled_gap_hist={},
+                            longest_filled_gap_s=0.2333,
+                            longest_unfilled_gap_s=0.0),
         "right": ArmCoverage(n=240, measured=197, interpolated=43, unfillable=0,
-                             gap_hist={1: 5}, longest_gap_s=0.0667),
+                             filled_gap_hist={1: 5}, unfilled_gap_hist={},
+                             longest_filled_gap_s=0.0667,
+                             longest_unfilled_gap_s=0.0),
     })]
-    text = format_report(res, fps=30)
+    text = format_report(res)
     assert "episode_000000" in text
     assert "measured 178/240 (74.2%)" in text
     assert "interpolated 62" in text
     assert "3x1f, 2x4f, 1x7f" in text
-    assert "longest 0.233s" in text
+    assert "longest filled 0.233s" in text
     assert "usable 240/240 (100.0%)" in text
     assert "KEEP" in text
+    # no unfilled gaps on either arm -> no unfilled-gap line at all
+    assert "unfilled gaps" not in text
 
 
 def test_format_report_flags_low_usable():
@@ -353,13 +362,20 @@ def test_format_report_flags_low_usable():
     from robodriver_robot_deepcybo_lite_umi_ros2.smooth_episodes import EpisodeResult
     res = [EpisodeResult(episode_index=0, coverage={
         "left": ArmCoverage(n=100, measured=50, interpolated=10, unfillable=40,
-                            gap_hist={}, longest_gap_s=2.0),
+                            filled_gap_hist={}, unfilled_gap_hist={40: 1},
+                            longest_filled_gap_s=0.0,
+                            longest_unfilled_gap_s=2.0),
         "right": ArmCoverage(n=100, measured=100, interpolated=0, unfillable=0,
-                             gap_hist={}, longest_gap_s=0.0),
+                             filled_gap_hist={}, unfilled_gap_hist={},
+                             longest_filled_gap_s=0.0,
+                             longest_unfilled_gap_s=0.0),
     })]
-    text = format_report(res, fps=30)
+    text = format_report(res)
     assert "usable 60/100 (60.0%)" in text
     assert "REVIEW" in text
+    # left arm's rejected gap must be surfaced distinctly from filled ones
+    assert "unfilled gaps: 1x40f" in text
+    assert "longest unfilled 2.000s" in text
 
 
 def test_cli_end_to_end(raw_ds, tmp_path, capsys):
