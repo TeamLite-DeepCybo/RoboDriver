@@ -278,3 +278,47 @@ def test_smooth_dataset_refuses_output_ancestor_of_root(raw_ds):
     with pytest.raises(ValueError, match="ancestor"):
         smooth_dataset(raw_ds, raw_ds.parent, max_gap_s=0.25, overwrite=True)
     assert (raw_ds / "meta" / "info.json").is_file()
+
+
+def _files_under(root: Path) -> set[Path]:
+    return {p.relative_to(root) for p in root.rglob("*") if p.is_file()}
+
+
+def test_smooth_dataset_refuses_output_nested_inside_root(raw_ds):
+    """Mirror case of the aliasing guard: out nested INSIDE root must be
+    refused too -- the input dataset directory must never be written to,
+    in any code path."""
+    before = _files_under(raw_ds)
+
+    with pytest.raises(ValueError, match="nested inside"):
+        smooth_dataset(raw_ds, raw_ds / "smoothed", max_gap_s=0.25)
+
+    after = _files_under(raw_ds)
+    assert before == after
+
+
+def test_smooth_dataset_refuses_deeply_nested_output(raw_ds):
+    """A deeper nesting under root must also be refused."""
+    before = _files_under(raw_ds)
+
+    with pytest.raises(ValueError, match="nested inside"):
+        smooth_dataset(raw_ds, raw_ds / "a" / "b", max_gap_s=0.25)
+
+    after = _files_under(raw_ds)
+    assert before == after
+
+
+def test_smooth_dataset_accepts_prefix_sharing_sibling(raw_ds, tmp_path):
+    """Regression guard: a sibling output dir whose name merely shares the
+    input's directory name as a string PREFIX (raw -> raw_smoothed) must
+    still be accepted. A naive string-prefix check on the resolved paths
+    would wrongly reject this since str(out).startswith(str(root)) is True
+    even though raw_smoothed is not inside raw -- the guard must use
+    Path.resolve()/.parents semantics instead."""
+    out = tmp_path / "raw_smoothed"
+    # confirms this is the tricky prefix case a naive string check would trip on
+    assert str(out).startswith(str(raw_ds))
+
+    results = smooth_dataset(raw_ds, out, max_gap_s=0.25)
+    assert len(results) == 1
+    assert (out / "data/chunk-000/episode_000000.parquet").is_file()

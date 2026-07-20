@@ -181,6 +181,12 @@ def smooth_dataset(
             "overwrite=True would shutil.rmtree(out) and destroy the input "
             "dataset -- refusing to let out alias or contain root"
         )
+    if root_r in out_r.parents:
+        raise ValueError(
+            f"out ({out}) is nested inside root ({root}); the output "
+            "cannot be placed inside the input dataset -- writing episodes "
+            "and images there would mutate root's own directory tree"
+        )
     info_path = root / "meta" / "info.json"
     if not info_path.is_file():
         raise ValueError(f"not a LeRobot dataset root (no meta/info.json): {root}")
