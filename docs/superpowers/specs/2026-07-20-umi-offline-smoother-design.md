@@ -51,7 +51,7 @@ which is the actual root cause.
 
 ```
 umi_real_rec_2026-07-15/            (raw — never modified)
-   │  read via DoRobotDataset  (canonical path; avoids the v2.1/v3.0 skew of a1da5dc)
+   │  read: parquet via pandas/pyarrow, meta/*.json[l] directly
    ▼
 per episode, per arm (left and right fully independent):
    anchors = state[:, <arm>_tracked] == 1
@@ -81,6 +81,21 @@ copy (`--link-images copy`). Only the parquet and `meta/` are rewritten.
 
 **`action` is regenerated from the smoothed state** to preserve the adapter's
 invariant `action == state[:16]` exactly.
+
+**Dataset I/O is direct file manipulation, not `DoRobotDataset`.** Two landmines
+found in source during planning: `DoRobotDataset.create()` dereferences
+`robot.microphones` with no `None` guard (`dorobot_dataset.py:1373`), and
+`add_frame()`'s presence validation would force images through the async image
+writer — re-encoding JPEGs the spec requires untouched. Instead the smoother
+reads parquet via pandas and writes via pyarrow, mirroring the original file
+byte-conventions exactly: `fixed_size_list<float>[N]` arrow columns plus the
+`huggingface` schema-metadata JSON (verified present in the recorded parquet),
+with `meta/` copied and surgically patched. Consequence: the smoother runs with
+only pandas/pyarrow/numpy/scipy (no torch/lerobot env needed), and
+**canonical-reader compatibility is enforced by the Task 1 spike** (open the
+output with `DoRobotDataset` + `visualize_episode` on Linux) rather than by
+using that class at runtime — the same a1da5dc skew risk, now checked
+explicitly instead of assumed.
 
 ## Rotation interpolation
 
