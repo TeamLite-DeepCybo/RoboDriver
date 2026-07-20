@@ -322,3 +322,57 @@ def test_smooth_dataset_accepts_prefix_sharing_sibling(raw_ds, tmp_path):
     results = smooth_dataset(raw_ds, out, max_gap_s=0.25)
     assert len(results) == 1
     assert (out / "data/chunk-000/episode_000000.parquet").is_file()
+
+
+from robodriver_robot_deepcybo_lite_umi_ros2.smooth_episodes import (
+    format_report, main,
+)
+
+
+def test_format_report_shape():
+    from robodriver_robot_deepcybo_lite_umi_ros2.smoothing import ArmCoverage
+    from robodriver_robot_deepcybo_lite_umi_ros2.smooth_episodes import EpisodeResult
+    res = [EpisodeResult(episode_index=0, coverage={
+        "left": ArmCoverage(n=240, measured=178, interpolated=62, unfillable=0,
+                            gap_hist={1: 3, 4: 2, 7: 1}, longest_gap_s=0.2333),
+        "right": ArmCoverage(n=240, measured=197, interpolated=43, unfillable=0,
+                             gap_hist={1: 5}, longest_gap_s=0.0667),
+    })]
+    text = format_report(res, fps=30)
+    assert "episode_000000" in text
+    assert "measured 178/240 (74.2%)" in text
+    assert "interpolated 62" in text
+    assert "3x1f, 2x4f, 1x7f" in text
+    assert "longest 0.233s" in text
+    assert "usable 240/240 (100.0%)" in text
+    assert "KEEP" in text
+
+
+def test_format_report_flags_low_usable():
+    from robodriver_robot_deepcybo_lite_umi_ros2.smoothing import ArmCoverage
+    from robodriver_robot_deepcybo_lite_umi_ros2.smooth_episodes import EpisodeResult
+    res = [EpisodeResult(episode_index=0, coverage={
+        "left": ArmCoverage(n=100, measured=50, interpolated=10, unfillable=40,
+                            gap_hist={}, longest_gap_s=2.0),
+        "right": ArmCoverage(n=100, measured=100, interpolated=0, unfillable=0,
+                             gap_hist={}, longest_gap_s=0.0),
+    })]
+    text = format_report(res, fps=30)
+    assert "usable 60/100 (60.0%)" in text
+    assert "REVIEW" in text
+
+
+def test_cli_end_to_end(raw_ds, tmp_path, capsys):
+    out = tmp_path / "smoothed"
+    rc = main(["--root", str(raw_ds), "--out", str(out), "--max-gap-s", "0.25"])
+    assert rc == 0
+    assert (out / "meta" / "info.json").is_file()
+    assert "episode_000000" in capsys.readouterr().out
+
+
+def test_cli_dry_run(raw_ds, tmp_path, capsys):
+    out = tmp_path / "smoothed"
+    rc = main(["--root", str(raw_ds), "--out", str(out), "--dry-run"])
+    assert rc == 0
+    assert not out.exists()
+    assert "interpolated 2" in capsys.readouterr().out

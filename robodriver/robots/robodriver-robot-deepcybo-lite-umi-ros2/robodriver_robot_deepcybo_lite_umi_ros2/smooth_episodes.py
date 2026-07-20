@@ -265,3 +265,81 @@ def smooth_dataset(
                     link_images,
                 )
     return results
+
+
+import argparse
+
+USABLE_KEEP_THRESHOLD = 0.90  # matches the README's >90% coverage target
+
+
+def format_report(results: list[EpisodeResult], fps: int) -> str:
+    """Per-episode/per-arm coverage report (spec §CLI).
+
+    'usable' is a lower bound: n minus the WORST arm's unfillable count.
+    (Exact per-frame overlap would need provenance masks in EpisodeResult;
+    the worst-arm bound is sufficient for the KEEP/REVIEW decision.)
+    """
+    lines: list[str] = []
+    for res in results:
+        lines.append(f"episode_{res.episode_index:06d}")
+        n = next(iter(res.coverage.values())).n
+        for arm in ("left", "right"):
+            c = res.coverage[arm]
+            hist = ", ".join(
+                f"{cnt}x{ln}f" for ln, cnt in sorted(c.gap_hist.items())
+            )
+            pct = 100.0 * c.measured / max(c.n, 1)
+            lines.append(
+                f"  {arm:<7} measured {c.measured}/{c.n} ({pct:.1f}%)"
+                f"  interpolated {c.interpolated}  unfillable {c.unfillable}"
+            )
+            if hist:
+                lines.append(
+                    f"          gaps: {hist}    longest {c.longest_gap_s:.3f}s"
+                )
+        worst_unfillable = max(c.unfillable for c in res.coverage.values())
+        usable = n - worst_unfillable  # lower bound (arms' gaps may overlap)
+        frac = usable / max(n, 1)
+        verdict = "KEEP" if frac >= USABLE_KEEP_THRESHOLD else "REVIEW"
+        lines.append(
+            f"  -> usable {usable}/{n} ({100.0 * frac:.1f}%)   {verdict}"
+        )
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Offline UMI episode smoother: interpolate dropout frames "
+        "between tracked anchors into a NEW dataset (raw left untouched)."
+    )
+    parser.add_argument("--root", type=Path, required=True,
+                        help="input dataset root (never modified)")
+    parser.add_argument("--out", type=Path, required=True,
+                        help="output dataset root (must not exist)")
+    parser.add_argument("--max-gap-s", type=float, default=0.25,
+                        help="max anchor-to-anchor gap span to fill (default 0.25)")
+    parser.add_argument("--link-images", choices=("hard", "copy"), default="hard")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print the coverage report without writing")
+    parser.add_argument("--overwrite", action="store_true")
+    args = parser.parse_args(argv)
+
+    info = json.loads(
+        (args.root / "meta" / "info.json").read_text(encoding="utf-8")
+    )
+    results = smooth_dataset(
+        args.root, args.out, args.max_gap_s,
+        link_images=args.link_images,
+        overwrite=args.overwrite,
+        dry_run=args.dry_run,
+    )
+    print(format_report(results, fps=info["fps"]))
+    if args.dry_run:
+        print("\n(dry run: nothing written)")
+    else:
+        print(f"\nwrote {len(results)} episode(s) -> {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

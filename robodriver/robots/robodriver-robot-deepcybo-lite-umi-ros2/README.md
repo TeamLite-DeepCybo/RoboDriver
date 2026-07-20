@@ -63,6 +63,25 @@ deepcybo-lite-umi-smoke-record --duration-s 5
 deepcybo-lite-umi-visualize-episode --root /tmp/umi_smoke_drop
 ```
 
+## Offline smoothing (post-collection)
+
+Recorded episodes contain hold-last dropout frames (tracker + adapter tiers,
+flagged by the quality dims). `umi-smooth-episodes` rebuilds every
+non-measured frame by lerp+Slerp between `tracked==1` anchors, writing a NEW
+dataset with an `observation.provenance` feature (0=measured, 1=interpolated,
+2=unfillable) — the raw dataset is never modified:
+
+```bash
+umi-smooth-episodes --root <dataset> --out <dataset>_smoothed [--max-gap-s 0.25]
+umi-smooth-episodes --root <dataset> --out /dev/null --dry-run   # report only
+```
+
+> **WARNING — provenance is for filtering, not for the policy.** Like the 7
+> quality dims, `observation.provenance` must be excluded from policy inputs
+> in training configs.
+
+Design: `docs/superpowers/specs/2026-07-20-umi-offline-smoother-design.md`.
+
 ## send_action
 
 This robot is record-only: `send_action()` raises `NotImplementedError`.

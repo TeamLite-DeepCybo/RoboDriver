@@ -18,6 +18,9 @@ dependencies = [
   "logging_mp",
   "opencv-python",
   "numpy",
+  "pandas",
+  "pyarrow",
+  "scipy",
 ]
 
 [project.scripts]
@@ -25,6 +28,7 @@ deepcybo-lite-umi-mock-ros2 = "robodriver_robot_deepcybo_lite_umi_ros2.mock_umi_
 deepcybo-lite-umi-smoke-record = "robodriver_robot_deepcybo_lite_umi_ros2.smoke_record:main"
 deepcybo-lite-umi-visualize-episode = "robodriver_robot_deepcybo_lite_umi_ros2.visualize_episode:main"
 deepcybo-lite-umi-debug-overlay = "robodriver_robot_deepcybo_lite_umi_ros2.debug_overlay:main"
+umi-smooth-episodes = "robodriver_robot_deepcybo_lite_umi_ros2.smooth_episodes:main"
 
 [tool.setuptools.packages.find]
 include = ["robodriver_robot_deepcybo_lite_umi_ros2"]
