@@ -32,21 +32,30 @@
 The one unverified risk: can `DoRobotDataset` open a dataset whose parquet we wrote ourselves with an extra `observation.provenance` column? This task builds a tiny synthetic dataset with plain pyarrow (no smoother code — it doesn't exist yet) and a test that opens it with `DoRobotDataset`. The test SKIPs where `robodriver` deps are missing (Windows) and runs on the Linux rig. **If this test fails on Linux, STOP and switch the design to the sidecar `meta/provenance.jsonl` fallback (spec §Output schema) before doing Tasks 4–6.**
 
 **Files:**
+- Create: `tests/dataset_fixture.py` (plain helper module — NOT a test module)
 - Create: `tests/test_canonical_reader.py`
 
 **Interfaces:**
-- Produces: `make_tiny_dataset(root: Path, with_provenance: bool = True) -> None` — builds a minimal 1-episode, 6-frame, 1-camera v2.1 dataset on disk. Tasks 4–6 tests import it as the raw-dataset fixture: `from tests.test_canonical_reader import make_tiny_dataset`.
+- Produces (in `tests/dataset_fixture.py`): `make_tiny_dataset(root: Path, with_provenance: bool = True, state: np.ndarray | None = None) -> None` — builds a minimal 1-episode, 6-frame, 1-camera v2.1 dataset on disk; plus `default_state(n) -> np.ndarray`, `STATE_NAMES`, `ACTION_NAMES`, `FPS`, `N`. Tasks 4–6 tests import from this module.
 
-- [ ] **Step 1: Write the fixture + gated test**
+> **Why a separate module:** `pytest.importorskip` at module level raises
+> `Skipped` on import. If the fixture lived in `test_canonical_reader.py`,
+> importing it from Tasks 4–6 tests would skip THOSE suites entirely on any
+> machine without the RoboDriver env. The guard must stay confined to the
+> spike test.
+
+- [ ] **Step 1a: Write the fixture module**
 
 ```python
-# tests/test_canonical_reader.py
-"""Spike (spec Task 1): a dataset with an extra observation.provenance column
-must be readable by the canonical DoRobotDataset reader.
+# tests/dataset_fixture.py
+"""Builds a minimal LeRobot v2.1 UMI dataset on disk for tests.
 
-The fixture writes v2.1 files directly with pyarrow/json so it is independent
-of the smoother implementation (it doubles as the raw-dataset fixture for the
-smoother's own tests, via with_provenance=False).
+Writes the v2.1 files directly with pyarrow/json, so it is independent of the
+smoother implementation and can produce BOTH the raw input (with_provenance=
+False) and a provenance-carrying dataset (for the canonical-reader spike).
+
+NOT a test module — no test collection, and deliberately free of any
+pytest.importorskip guard so importing it never skips the caller's suite.
 """
 import json
 from pathlib import Path
@@ -54,7 +63,6 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pytest
 
 FPS = 30
 N = 6  # frames
@@ -224,7 +232,27 @@ def make_tiny_dataset(
     (meta / "episodes_stats.jsonl").write_text(
         json.dumps(stats) + "\n", encoding="utf-8"
     )
+```
 
+- [ ] **Step 1b: Write the gated spike test**
+
+```python
+# tests/test_canonical_reader.py
+"""Spike (plan Task 1): a dataset carrying an extra observation.provenance
+column must be readable by the canonical DoRobotDataset reader.
+
+Skips where the RoboDriver env is absent (Windows dev box); the Linux rig run
+is the actual gate. If this FAILS on Linux, stop and switch to the spec's
+sidecar meta/provenance.jsonl fallback before building Tasks 4-6.
+"""
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parent))
+from dataset_fixture import N, make_tiny_dataset  # noqa: E402
 
 robodriver = pytest.importorskip(
     "robodriver.dataset.dorobot_dataset",
@@ -255,14 +283,22 @@ The Linux run is the actual gate. If it fails there: STOP, report the error, and
 
 - [ ] **Step 3: Sanity-check the fixture parquet locally (Windows-runnable)**
 
-Run: `python -c "import pandas as pd, tempfile, pathlib, sys; sys.path.insert(0,'.'); from tests.test_canonical_reader import make_tiny_dataset; d=pathlib.Path(tempfile.mkdtemp()); make_tiny_dataset(d); df=pd.read_parquet(d/'data/chunk-000/episode_000000.parquet'); print(df.shape, list(df.columns))"`
+Run: `python -c "import sys,tempfile,pathlib; sys.path.insert(0,'tests'); import pandas as pd; from dataset_fixture import make_tiny_dataset; d=pathlib.Path(tempfile.mkdtemp()); make_tiny_dataset(d); df=pd.read_parquet(d/'data/chunk-000/episode_000000.parquet'); print(df.shape, list(df.columns))"`
 Expected: `(6, 8) ['action', 'observation.state', 'timestamp', 'frame_index', 'episode_index', 'index', 'task_index', 'observation.provenance']`
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Verify the fixture import does NOT skip a plain suite**
+
+Create a scratch check that the guard is properly confined:
+
+Run: `python -c "import sys; sys.path.insert(0,'tests'); import dataset_fixture; print('fixture imports cleanly without robodriver:', dataset_fixture.N)"`
+Expected: `fixture imports cleanly without robodriver: 6` (no Skipped exception)
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add robodriver/robots/robodriver-robot-deepcybo-lite-umi-ros2/tests/test_canonical_reader.py
-git commit -m "Add canonical-reader spike for the provenance column (Linux-gated)"
+git add robodriver/robots/robodriver-robot-deepcybo-lite-umi-ros2/tests/dataset_fixture.py \
+        robodriver/robots/robodriver-robot-deepcybo-lite-umi-ros2/tests/test_canonical_reader.py
+git commit -m "Add canonical-reader spike and reusable tiny-dataset fixture"
 ```
 
 ---
@@ -747,7 +783,7 @@ import pyarrow.parquet as pq
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
-from test_canonical_reader import default_state, make_tiny_dataset  # noqa: E402
+from dataset_fixture import default_state, make_tiny_dataset  # noqa: E402
 
 from robodriver_robot_deepcybo_lite_umi_ros2.smoothing import (  # noqa: E402
     INTERPOLATED, MEASURED,
@@ -1508,4 +1544,5 @@ Expected: spike test PASSES on Linux; visualize-episode opens and plays the smoo
 
 - **Spec coverage:** offline CLI/new dataset (T5–6), anchors `tracked==1` (T2–3), keep+mark+report (T2–6), fill-only bit-exact (T2, pinned in T2/T4/T7 tests), adapter-package home (all), Slerp short-arc pin (T2), provenance schema + hf metadata (T4), declared⇒mandatory consequence honored by always writing the column (T4), stats/meta patch (T5), images hardlink (T5), dry-run/report/`max_gap_s` anchor-to-anchor default 0.25 (T2/T6), error cases (T3 monotonic, T5 exists/videos, T4 post-condition assert), spike + canonical-reader gate (T1, T7 step 4), real-episode e2e (T7). Sidecar fallback is a documented stop-condition in T1/T7, not built (YAGNI).
 - **Known simplification:** `usable` in the report is the worst-arm lower bound (per-frame overlap not tracked); exact per-frame usable requires provenance masks in `EpisodeResult` — not needed for the KEEP/REVIEW decision at current data volumes.
-- **Type consistency check:** `EpisodeResult.coverage: dict[str, ArmCoverage]` used identically in T4/T5/T6/T7; `smooth_arm`/`smooth_state` signatures match between T2/T3 definitions and T4 call sites; fixture import path (`tests/test_canonical_reader.py`) used via `sys.path` insert in T4's test header.
+- **Type consistency check:** `EpisodeResult.coverage: dict[str, ArmCoverage]` used identically in T4/T5/T6/T7; `smooth_arm`/`smooth_state` signatures match between T2/T3 definitions and T4 call sites; fixture lives in `tests/dataset_fixture.py` and is imported via `sys.path` insert in T1's spike test and T4's test header.
+- **Pre-flight fix (2026-07-20):** the fixture was originally specified inside `test_canonical_reader.py`, whose module-level `pytest.importorskip` would have raised `Skipped` on import and silently skipped the entire Task 4/5/6 suites on any machine without the RoboDriver env. Fixture extracted to `tests/dataset_fixture.py`; the guard is now confined to the spike test, verified by Task 1 Step 4.
