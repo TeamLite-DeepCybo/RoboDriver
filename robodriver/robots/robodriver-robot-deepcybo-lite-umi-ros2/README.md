@@ -73,7 +73,7 @@ dataset with an `observation.provenance` feature (0=measured, 1=interpolated,
 
 ```bash
 umi-smooth-episodes --root <dataset> --out <dataset>_smoothed [--max-gap-s 0.25]
-umi-smooth-episodes --root <dataset> --out /dev/null --dry-run   # report only
+umi-smooth-episodes --root <dataset> --dry-run                   # report only
 ```
 
 > **WARNING — provenance is for filtering, not for the policy.** Like the 7

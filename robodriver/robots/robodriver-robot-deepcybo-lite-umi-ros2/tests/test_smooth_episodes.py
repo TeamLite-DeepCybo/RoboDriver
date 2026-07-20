@@ -376,3 +376,34 @@ def test_cli_dry_run(raw_ds, tmp_path, capsys):
     assert rc == 0
     assert not out.exists()
     assert "interpolated 2" in capsys.readouterr().out
+
+
+def test_cli_dry_run_without_out(raw_ds, tmp_path, capsys):
+    """--dry-run must not require --out at all: the flag is unused when
+    dry_run=True, so forcing the user to invent an output path is
+    pointless (and the README no longer tells them to pass /dev/null)."""
+    before = _files_under(tmp_path)
+    rc = main(["--root", str(raw_ds), "--dry-run"])
+    assert rc == 0
+    out_text = capsys.readouterr().out
+    assert "interpolated 2" in out_text
+    assert "nothing written" in out_text
+    # nothing new appeared anywhere under tmp_path
+    assert _files_under(tmp_path) == before
+
+
+def test_cli_requires_out_without_dry_run(raw_ds):
+    """Omitting --out for a real (non-dry-run) invocation must fail fast
+    via argparse, not silently proceed or fail deep inside smooth_dataset."""
+    with pytest.raises(SystemExit):
+        main(["--root", str(raw_ds)])
+
+
+def test_cli_dry_run_with_out_still_works(raw_ds, tmp_path, capsys):
+    """Backwards compatible: passing --out alongside --dry-run must keep
+    working exactly as before (it's simply unused)."""
+    out = tmp_path / "smoothed"
+    rc = main(["--root", str(raw_ds), "--out", str(out), "--dry-run"])
+    assert rc == 0
+    assert not out.exists()
+    assert "interpolated 2" in capsys.readouterr().out

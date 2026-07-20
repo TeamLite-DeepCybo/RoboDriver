@@ -268,6 +268,7 @@ def smooth_dataset(
 
 
 import argparse
+import tempfile
 
 USABLE_KEEP_THRESHOLD = 0.90  # matches the README's >90% coverage target
 
@@ -314,8 +315,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--root", type=Path, required=True,
                         help="input dataset root (never modified)")
-    parser.add_argument("--out", type=Path, required=True,
-                        help="output dataset root (must not exist)")
+    parser.add_argument("--out", type=Path, default=None,
+                        help="output dataset root; must not already exist "
+                        "unless --overwrite is given; required unless "
+                        "--dry-run is given (unused in dry-run mode)")
     parser.add_argument("--max-gap-s", type=float, default=0.25,
                         help="max anchor-to-anchor gap span to fill (default 0.25)")
     parser.add_argument("--link-images", choices=("hard", "copy"), default="hard")
@@ -324,11 +327,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args(argv)
 
+    if not args.dry_run and args.out is None:
+        parser.error("--out is required unless --dry-run is given")
+
+    # In dry-run mode --out is optional and unused (smooth_dataset never
+    # writes anything when dry_run=True); when omitted, pass a placeholder
+    # that cannot alias, contain, or be contained by --root so the
+    # unconditional alias/containment guards in smooth_dataset never trip.
+    out_arg = args.out
+    if out_arg is None:
+        out_arg = Path(tempfile.gettempdir()) / "smooth_episodes_dry_run_unused"
+
     info = json.loads(
         (args.root / "meta" / "info.json").read_text(encoding="utf-8")
     )
     results = smooth_dataset(
-        args.root, args.out, args.max_gap_s,
+        args.root, out_arg, args.max_gap_s,
         link_images=args.link_images,
         overwrite=args.overwrite,
         dry_run=args.dry_run,
