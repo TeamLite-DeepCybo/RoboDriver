@@ -50,23 +50,36 @@ class EpisodeResult:
     coverage: dict[str, ArmCoverage]
 
 
-def process_episode_parquet(
-    src: Path, dst: Path, max_gap_s: float
-) -> EpisodeResult:
-    """Smooth one episode parquet from src into dst (dst parent must exist)."""
-    table_in = pq.read_table(src)
-    df = table_in.to_pandas()
+def _smooth_episode_frame(
+    df: pd.DataFrame, max_gap_s: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, ArmCoverage]]:
+    """Shared read -> smooth -> coverage transform for one episode.
+
+    Takes the episode's raw dataframe (as read from its source parquet) and
+    returns (state_out, action_out, provenance, coverage):
+      - state_out:  (N, 23) smoothed observation.state
+      - action_out: (N, 16) regenerated action (mirrors state_out[:, :16])
+      - provenance: (N, 2) [left, right] MEASURED/INTERPOLATED/UNFILLABLE
+      - coverage:   {"left": ArmCoverage, "right": ArmCoverage}
+
+    This is the single source of truth for the smoothing + coverage
+    computation, called by BOTH process_episode_parquet (which additionally
+    writes the result to a parquet file) and smooth_dataset's dry_run branch
+    (which writes nothing). Keeping one implementation means the two paths
+    can never drift or disagree on reported coverage, and dry_run inherits
+    the cross-check assert below for free.
+    """
     times = df["timestamp"].to_numpy(dtype=float)
     state_in = np.stack(df["observation.state"].to_numpy())
 
     state_out, prov = smooth_state(times, state_in, max_gap_s)
     action_out = regen_action(state_out)
 
-    coverage = {}
+    coverage: dict[str, ArmCoverage] = {}
     for col, arm in enumerate(("left", "right")):
         anchors = state_in[:, ARM_LAYOUT[arm].tracked] > 0.5
         coverage[arm] = arm_coverage(times, anchors, prov[:, col])
-        # Cross-check (spec §Error handling): process_episode_parquet computes
+        # Cross-check (spec §Error handling): this function computes
         # `anchors` itself while smooth_state computes its own anchor mask
         # internally. If those two independently-derived masks ever diverge
         # (e.g. a changed threshold in one place but not the other),
@@ -76,6 +89,16 @@ def process_episode_parquet(
             f"anchor count {int(anchors.sum())} — smooth_state and "
             f"process_episode_parquet disagree on the anchor mask"
         )
+    return state_out, action_out, prov, coverage
+
+
+def process_episode_parquet(
+    src: Path, dst: Path, max_gap_s: float
+) -> EpisodeResult:
+    """Smooth one episode parquet from src into dst (dst parent must exist)."""
+    table_in = pq.read_table(src)
+    df = table_in.to_pandas()
+    state_out, action_out, prov, coverage = _smooth_episode_frame(df, max_gap_s)
 
     # Rebuild the table: original column order, pose columns replaced,
     # provenance appended last.
@@ -151,6 +174,13 @@ def smooth_dataset(
     "hard" (default; falls back to copy per-file on OSError) or "copy".
     """
     root, out = Path(root), Path(out)
+    root_r, out_r = root.resolve(), out.resolve()
+    if out_r == root_r or out_r in root_r.parents:
+        raise ValueError(
+            f"out ({out}) equals or is an ancestor of root ({root}); "
+            "overwrite=True would shutil.rmtree(out) and destroy the input "
+            "dataset -- refusing to let out alias or contain root"
+        )
     info_path = root / "meta" / "info.json"
     if not info_path.is_file():
         raise ValueError(f"not a LeRobot dataset root (no meta/info.json): {root}")
@@ -176,18 +206,12 @@ def smooth_dataset(
         rel = _episode_parquet_relpath(info, ep)
         src = root / rel
         if dry_run:
-            # Reuse the transform without writing: process into a throwaway
-            # in-memory location is not possible with pq.write_table, so
-            # compute coverage directly.
+            # Reuse the exact same read->smooth->coverage transform as the
+            # real path (_smooth_episode_frame), just without the write, so
+            # dry-run coverage can never drift from what a real run reports.
             table = pq.read_table(src)
             df = table.to_pandas()
-            times = df["timestamp"].to_numpy(dtype=float)
-            state_in = np.stack(df["observation.state"].to_numpy())
-            _, prov = smooth_state(times, state_in, max_gap_s)
-            coverage = {}
-            for col, arm in enumerate(("left", "right")):
-                anchors = state_in[:, ARM_LAYOUT[arm].tracked] > 0.5
-                coverage[arm] = arm_coverage(times, anchors, prov[:, col])
+            _, _, _, coverage = _smooth_episode_frame(df, max_gap_s)
             results.append(EpisodeResult(episode_index=ep, coverage=coverage))
             continue
 

@@ -146,12 +146,26 @@ def test_smooth_dataset_end_to_end(raw_ds, tmp_path):
     stats_in = json.loads((raw_ds / "meta/episodes_stats.jsonl").read_text(encoding="utf-8"))
     stats_out = json.loads((out / "meta/episodes_stats.jsonl").read_text(encoding="utf-8"))
     assert "observation.provenance" in stats_out["stats"]
-    assert stats_out["stats"]["timestamp"] == stats_in["stats"]["timestamp"]
+    # every untouched stats key must be byte-for-byte (exactly, not approx)
+    # equal to the input -- these are never recomputed, just copied through.
+    for key in ("timestamp", "frame_index", "episode_index", "index", "task_index"):
+        assert stats_out["stats"][key] == stats_in["stats"][key]
+
     df = pd.read_parquet(out / "data/chunk-000/episode_000000.parquet")
     s = np.stack(df["observation.state"])
-    assert stats_out["stats"]["observation.state"]["min"] == pytest.approx(
-        s.min(0).tolist()
-    )
+    a = np.stack(df["action"])
+    for stat_key, arr in (("observation.state", s), ("action", a)):
+        expected = {
+            "min": arr.min(0).tolist(),
+            "max": arr.max(0).tolist(),
+            "mean": arr.mean(0).tolist(),
+            "std": arr.std(0).tolist(),
+            "count": [len(arr)],
+        }
+        for field, value in expected.items():
+            assert stats_out["stats"][stat_key][field] == pytest.approx(value), (
+                f"{stat_key}.{field} mismatch"
+            )
 
     # images exist in the output tree
     img = out / "images/observation.images.image_head/episode_000000/frame_000000.jpg"
@@ -186,3 +200,81 @@ def test_smooth_dataset_copy_mode(raw_ds, tmp_path):
     smooth_dataset(raw_ds, out, max_gap_s=0.25, link_images="copy")
     img = out / "images/observation.images.image_head/episode_000000/frame_000001.jpg"
     assert img.is_file()
+
+
+def test_dry_run_and_real_run_report_same_coverage(raw_ds, tmp_path):
+    """Fix 2: dry_run and a real run must agree on coverage for every
+    episode and every arm -- defense-in-depth on top of both paths sharing
+    _smooth_episode_frame (Fix 1)."""
+    out_dry = tmp_path / "dry"
+    out_real = tmp_path / "real"
+    dry_results = smooth_dataset(raw_ds, out_dry, max_gap_s=0.25, dry_run=True)
+    real_results = smooth_dataset(raw_ds, out_real, max_gap_s=0.25, dry_run=False)
+
+    assert len(dry_results) == len(real_results) == 1
+    for dry_r, real_r in zip(dry_results, real_results):
+        assert dry_r.episode_index == real_r.episode_index
+        assert dry_r.coverage.keys() == real_r.coverage.keys()
+        for arm in dry_r.coverage:
+            assert dry_r.coverage[arm] == real_r.coverage[arm]
+
+
+def test_smooth_dataset_multi_episode(tmp_path):
+    """Fix 3: smooth_dataset must walk every episode, not just the first,
+    and each output episode's recomputed stats must reflect ITS OWN data."""
+    root = tmp_path / "raw_multi"
+    make_tiny_dataset(root, with_provenance=False, n_episodes=2)
+    out = tmp_path / "smoothed_multi"
+
+    results = smooth_dataset(root, out, max_gap_s=0.25)
+    assert [r.episode_index for r in results] == [0, 1]
+
+    stats_out = [
+        json.loads(line)
+        for line in (out / "meta/episodes_stats.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line.strip()
+    ]
+    assert len(stats_out) == 2
+
+    per_episode_state_min = {}
+    for ep in (0, 1):
+        dst = out / f"data/chunk-000/episode_{ep:06d}.parquet"
+        assert dst.is_file()
+        df = pd.read_parquet(dst)
+        assert "observation.provenance" in df.columns
+
+        rec = next(r for r in stats_out if r["episode_index"] == ep)
+        s = np.stack(df["observation.state"])
+        a = np.stack(df["action"])
+        assert rec["stats"]["observation.state"]["min"] == pytest.approx(
+            s.min(0).tolist()
+        )
+        assert rec["stats"]["observation.state"]["max"] == pytest.approx(
+            s.max(0).tolist()
+        )
+        assert rec["stats"]["action"]["mean"] == pytest.approx(a.mean(0).tolist())
+        per_episode_state_min[ep] = rec["stats"]["observation.state"]["min"]
+
+    # the two episodes' recomputed stats must not have been cross-wired
+    assert per_episode_state_min[0] != per_episode_state_min[1]
+
+
+def test_smooth_dataset_refuses_output_aliasing_root(raw_ds):
+    """Fix 5: out == root (or an ancestor of root) must be refused before
+    overwrite=True's shutil.rmtree(out) can destroy the input dataset."""
+    with pytest.raises(ValueError, match="ancestor"):
+        smooth_dataset(raw_ds, raw_ds, max_gap_s=0.25, overwrite=True)
+
+    # input survived untouched
+    assert (raw_ds / "meta" / "info.json").is_file()
+    raw_df = pd.read_parquet(raw_ds / "data/chunk-000/episode_000000.parquet")
+    assert "observation.provenance" not in raw_df.columns
+
+
+def test_smooth_dataset_refuses_output_ancestor_of_root(raw_ds):
+    """out one level above root is also an ancestor -- must be refused too."""
+    with pytest.raises(ValueError, match="ancestor"):
+        smooth_dataset(raw_ds, raw_ds.parent, max_gap_s=0.25, overwrite=True)
+    assert (raw_ds / "meta" / "info.json").is_file()
