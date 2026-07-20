@@ -12,11 +12,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 from dataset_fixture import default_state, make_tiny_dataset  # noqa: E402
 
 from robodriver_robot_deepcybo_lite_umi_ros2.smoothing import (  # noqa: E402
-    INTERPOLATED, MEASURED,
+    INTERPOLATED, MEASURED, ArmCoverage,
 )
 from robodriver_robot_deepcybo_lite_umi_ros2.smooth_episodes import (  # noqa: E402
     process_episode_parquet,
 )
+import robodriver_robot_deepcybo_lite_umi_ros2.smooth_episodes as smooth_episodes_mod  # noqa: E402
 
 
 @pytest.fixture()
@@ -85,3 +86,29 @@ def test_non_pose_columns_pass_through(raw_ds, tmp_path):
         assert (out[col].to_numpy() == raw[col].to_numpy()).all()
     s_in, s_out = np.stack(raw["observation.state"]), np.stack(out["observation.state"])
     assert (s_out[:, 16:23] == s_in[:, 16:23]).all()
+
+
+def test_measured_anchor_mismatch_raises(raw_ds, tmp_path, monkeypatch):
+    """If arm_coverage's `measured` disagrees with the anchor count that
+    process_episode_parquet computed itself, that's smooth_state and
+    process_episode_parquet disagreeing on the anchor mask -- must raise."""
+    src = raw_ds / "data/chunk-000/episode_000000.parquet"
+    dst = tmp_path / "out.parquet"
+
+    real_arm_coverage = smooth_episodes_mod.arm_coverage
+
+    def fake_arm_coverage(times, anchors, provenance):
+        cov = real_arm_coverage(times, anchors, provenance)
+        return ArmCoverage(
+            n=cov.n,
+            measured=cov.measured + 1,  # disagrees with true anchor count
+            interpolated=cov.interpolated,
+            unfillable=cov.unfillable,
+            gap_hist=cov.gap_hist,
+            longest_gap_s=cov.longest_gap_s,
+        )
+
+    monkeypatch.setattr(smooth_episodes_mod, "arm_coverage", fake_arm_coverage)
+
+    with pytest.raises(AssertionError, match="disagree on the anchor mask"):
+        process_episode_parquet(src, dst, max_gap_s=0.25)

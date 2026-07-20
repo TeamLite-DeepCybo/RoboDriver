@@ -199,8 +199,15 @@ Refuse rather than guess:
 - Fewer than 2 anchors in an episode -> emit untouched, all frames `UNFILLABLE`,
   log a prominent warning (nothing to bracket).
 - Non-monotonic or duplicate timestamps -> abort with the offending index.
-- Post-condition assert: an episode must never finish with more unfillable frames
-  than it began with held frames. Violation is a bug; fail loudly.
+- Cross-check assert: the anchor mask computed in the dataset layer
+  (`process_episode_parquet`, from `observation.state`'s tracked column) must
+  agree with the anchor count the smoothing layer reports (`ArmCoverage.measured`,
+  from `smooth_state`'s internally-computed anchor mask). A mismatch means the
+  two layers disagree on what counts as an anchor and is a bug; fail loudly.
+  (The original post-condition here — "an episode must never finish with more
+  unfillable frames than it began with held frames" — was definitionally true
+  for any output given how anchors/measured/unfillable are defined, so it could
+  never fail and has been removed.)
 
 ## Testing
 

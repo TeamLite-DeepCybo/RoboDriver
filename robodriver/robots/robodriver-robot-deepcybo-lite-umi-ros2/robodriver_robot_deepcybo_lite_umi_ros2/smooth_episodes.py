@@ -66,11 +66,15 @@ def process_episode_parquet(
     for col, arm in enumerate(("left", "right")):
         anchors = state_in[:, ARM_LAYOUT[arm].tracked] > 0.5
         coverage[arm] = arm_coverage(times, anchors, prov[:, col])
-        held_pre = coverage[arm].n - coverage[arm].measured
-        # Post-condition (spec §Error handling): smoothing must never
-        # increase the number of bad frames.
-        assert coverage[arm].unfillable <= held_pre, (
-            f"{arm}: unfillable {coverage[arm].unfillable} > held {held_pre}"
+        # Cross-check (spec §Error handling): process_episode_parquet computes
+        # `anchors` itself while smooth_state computes its own anchor mask
+        # internally. If those two independently-derived masks ever diverge
+        # (e.g. a changed threshold in one place but not the other),
+        # provenance and coverage would silently desync.
+        assert coverage[arm].measured == int(anchors.sum()), (
+            f"{arm}: coverage measured {coverage[arm].measured} != "
+            f"anchor count {int(anchors.sum())} — smooth_state and "
+            f"process_episode_parquet disagree on the anchor mask"
         )
 
     # Rebuild the table: original column order, pose columns replaced,
