@@ -112,3 +112,77 @@ def test_measured_anchor_mismatch_raises(raw_ds, tmp_path, monkeypatch):
 
     with pytest.raises(AssertionError, match="disagree on the anchor mask"):
         process_episode_parquet(src, dst, max_gap_s=0.25)
+
+
+from robodriver_robot_deepcybo_lite_umi_ros2.smooth_episodes import (
+    smooth_dataset,
+)
+
+
+def test_smooth_dataset_end_to_end(raw_ds, tmp_path):
+    out = tmp_path / "smoothed"
+    results = smooth_dataset(raw_ds, out, max_gap_s=0.25)
+    assert len(results) == 1
+
+    # info.json: provenance feature added, everything else preserved
+    info_in = json.loads((raw_ds / "meta/info.json").read_text(encoding="utf-8"))
+    info_out = json.loads((out / "meta/info.json").read_text(encoding="utf-8"))
+    assert info_out["features"]["observation.provenance"] == {
+        "dtype": "float32",
+        "names": ["left_provenance", "right_provenance"],
+        "shape": [2],
+    }
+    for k, v in info_in.items():
+        if k != "features":
+            assert info_out[k] == v
+    for k, v in info_in["features"].items():
+        assert info_out["features"][k] == v
+
+    # episodes/tasks copied verbatim
+    for name in ("episodes.jsonl", "tasks.jsonl"):
+        assert (out / "meta" / name).read_bytes() == (raw_ds / "meta" / name).read_bytes()
+
+    # stats: recomputed for state/action, added for provenance, others verbatim
+    stats_in = json.loads((raw_ds / "meta/episodes_stats.jsonl").read_text(encoding="utf-8"))
+    stats_out = json.loads((out / "meta/episodes_stats.jsonl").read_text(encoding="utf-8"))
+    assert "observation.provenance" in stats_out["stats"]
+    assert stats_out["stats"]["timestamp"] == stats_in["stats"]["timestamp"]
+    df = pd.read_parquet(out / "data/chunk-000/episode_000000.parquet")
+    s = np.stack(df["observation.state"])
+    assert stats_out["stats"]["observation.state"]["min"] == pytest.approx(
+        s.min(0).tolist()
+    )
+
+    # images exist in the output tree
+    img = out / "images/observation.images.image_head/episode_000000/frame_000000.jpg"
+    assert img.is_file()
+    assert img.read_bytes() == (
+        raw_ds / "images/observation.images.image_head/episode_000000/frame_000000.jpg"
+    ).read_bytes()
+
+    # raw dataset untouched (no provenance in the input parquet)
+    raw_df = pd.read_parquet(raw_ds / "data/chunk-000/episode_000000.parquet")
+    assert "observation.provenance" not in raw_df.columns
+
+
+def test_smooth_dataset_refuses_existing_out(raw_ds, tmp_path):
+    out = tmp_path / "smoothed"
+    out.mkdir()
+    with pytest.raises(FileExistsError):
+        smooth_dataset(raw_ds, out, max_gap_s=0.25)
+    smooth_dataset(raw_ds, out, max_gap_s=0.25, overwrite=True)  # ok
+
+
+def test_smooth_dataset_dry_run_writes_nothing(raw_ds, tmp_path):
+    out = tmp_path / "smoothed"
+    results = smooth_dataset(raw_ds, out, max_gap_s=0.25, dry_run=True)
+    assert len(results) == 1
+    assert results[0].coverage["left"].interpolated == 2
+    assert not out.exists()
+
+
+def test_smooth_dataset_copy_mode(raw_ds, tmp_path):
+    out = tmp_path / "smoothed"
+    smooth_dataset(raw_ds, out, max_gap_s=0.25, link_images="copy")
+    img = out / "images/observation.images.image_head/episode_000000/frame_000001.jpg"
+    assert img.is_file()

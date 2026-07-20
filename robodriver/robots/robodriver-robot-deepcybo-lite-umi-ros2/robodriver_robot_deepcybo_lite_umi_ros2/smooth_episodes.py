@@ -100,3 +100,138 @@ def process_episode_parquet(
 
     ep_idx = int(df["episode_index"].iloc[0]) if len(df) else 0
     return EpisodeResult(episode_index=ep_idx, coverage=coverage)
+
+
+import os
+import shutil
+
+
+def _episode_parquet_relpath(info: dict, episode_index: int) -> Path:
+    return Path(
+        info["data_path"].format(
+            episode_chunk=episode_index // info["chunks_size"],
+            episode_index=episode_index,
+        )
+    )
+
+
+def _stats_for(arr2d: np.ndarray) -> dict:
+    a = np.asarray(arr2d, dtype=np.float64)
+    return {
+        "min": a.min(0).tolist(),
+        "max": a.max(0).tolist(),
+        "mean": a.mean(0).tolist(),
+        "std": a.std(0).tolist(),
+        "count": [int(len(a))],
+    }
+
+
+def _link_or_copy(src: Path, dst: Path, mode: str) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if mode == "hard":
+        try:
+            os.link(src, dst)
+            return
+        except OSError:
+            pass  # cross-device or unsupported FS -> fall back to copy
+    shutil.copy2(src, dst)
+
+
+def smooth_dataset(
+    root: Path,
+    out: Path,
+    max_gap_s: float,
+    link_images: str = "hard",
+    overwrite: bool = False,
+    dry_run: bool = False,
+) -> list[EpisodeResult]:
+    """Smooth every episode of the dataset at root into a new dataset at out.
+
+    dry_run computes coverage without writing anything. link_images is
+    "hard" (default; falls back to copy per-file on OSError) or "copy".
+    """
+    root, out = Path(root), Path(out)
+    info_path = root / "meta" / "info.json"
+    if not info_path.is_file():
+        raise ValueError(f"not a LeRobot dataset root (no meta/info.json): {root}")
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    if info.get("video_path") and info.get("total_videos", 0) > 0:
+        raise NotImplementedError(
+            "video-backed datasets are out of scope; this recorder writes images"
+        )
+    if link_images not in ("hard", "copy"):
+        raise ValueError(f"link_images must be 'hard' or 'copy', got {link_images!r}")
+    if not dry_run:
+        if out.exists():
+            if not overwrite:
+                raise FileExistsError(
+                    f"output exists: {out} (pass overwrite=True / --overwrite)"
+                )
+            shutil.rmtree(out)
+        (out / "data").mkdir(parents=True)
+        (out / "meta").mkdir()
+
+    results: list[EpisodeResult] = []
+    for ep in range(info["total_episodes"]):
+        rel = _episode_parquet_relpath(info, ep)
+        src = root / rel
+        if dry_run:
+            # Reuse the transform without writing: process into a throwaway
+            # in-memory location is not possible with pq.write_table, so
+            # compute coverage directly.
+            table = pq.read_table(src)
+            df = table.to_pandas()
+            times = df["timestamp"].to_numpy(dtype=float)
+            state_in = np.stack(df["observation.state"].to_numpy())
+            _, prov = smooth_state(times, state_in, max_gap_s)
+            coverage = {}
+            for col, arm in enumerate(("left", "right")):
+                anchors = state_in[:, ARM_LAYOUT[arm].tracked] > 0.5
+                coverage[arm] = arm_coverage(times, anchors, prov[:, col])
+            results.append(EpisodeResult(episode_index=ep, coverage=coverage))
+            continue
+
+        dst = out / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        results.append(process_episode_parquet(src, dst, max_gap_s))
+
+    if dry_run:
+        return results
+
+    # ---- meta/ ----
+    info_out = json.loads(json.dumps(info))  # deep copy
+    info_out["features"][PROVENANCE_KEY] = dict(PROVENANCE_FEATURE)
+    (out / "meta" / "info.json").write_text(
+        json.dumps(info_out, indent=4), encoding="utf-8"
+    )
+    for name in ("episodes.jsonl", "tasks.jsonl"):
+        shutil.copy2(root / "meta" / name, out / "meta" / name)
+
+    stats_lines = []
+    with open(root / "meta" / "episodes_stats.jsonl", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                stats_lines.append(json.loads(line))
+    with open(out / "meta" / "episodes_stats.jsonl", "w", encoding="utf-8") as f:
+        for rec in stats_lines:
+            ep = rec["episode_index"]
+            df = pd.read_parquet(out / _episode_parquet_relpath(info, ep))
+            rec["stats"]["observation.state"] = _stats_for(
+                np.stack(df["observation.state"])
+            )
+            rec["stats"]["action"] = _stats_for(np.stack(df["action"]))
+            rec["stats"][PROVENANCE_KEY] = _stats_for(
+                np.stack(df[PROVENANCE_KEY])
+            )
+            f.write(json.dumps(rec) + "\n")
+
+    # ---- images ----
+    images_root = root / "images"
+    if images_root.is_dir():
+        for src_img in images_root.rglob("*"):
+            if src_img.is_file():
+                _link_or_copy(
+                    src_img, out / "images" / src_img.relative_to(images_root),
+                    link_images,
+                )
+    return results
