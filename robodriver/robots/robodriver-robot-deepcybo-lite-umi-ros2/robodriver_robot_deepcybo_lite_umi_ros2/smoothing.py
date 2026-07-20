@@ -94,3 +94,84 @@ def smooth_arm(
             quat_out[k] = slerp([times[k]]).as_quat()[0]
             prov[k] = INTERPOLATED
     return pos_out, quat_out, prov
+
+
+GRIPPER_COLS = (7, 15)
+QUALITY_COLS = slice(16, 23)
+
+
+def smooth_state(
+    times: np.ndarray, state: np.ndarray, max_gap_s: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Smooth both arms of an (N, 23) state matrix independently.
+
+    Returns (state_out, provenance) with provenance (N, 2) ordered
+    [left, right]. Gripper and quality columns pass through untouched.
+    Raises ValueError on wrong state shape or non-monotonic timestamps.
+    """
+    state = np.asarray(state)
+    times = np.asarray(times, dtype=float)
+    if state.ndim != 2 or state.shape[1] != STATE_DIM:
+        raise ValueError(
+            f"state must be (N, {STATE_DIM}), got {state.shape}"
+        )
+    if len(times) != len(state):
+        raise ValueError("times and state length mismatch")
+    dt = np.diff(times)
+    if len(dt) and dt.min() <= 0:
+        bad = int(np.argmin(dt)) + 1
+        raise ValueError(
+            f"timestamps not strictly monotonic at index {bad} "
+            f"(t[{bad - 1}]={times[bad - 1]}, t[{bad}]={times[bad]})"
+        )
+
+    out = np.array(state, copy=True)
+    prov = np.zeros((len(state), 2), dtype=np.float32)
+    for col, arm in enumerate(("left", "right")):
+        lay = ARM_LAYOUT[arm]
+        anchors = state[:, lay.tracked] > 0.5
+        pos_out, quat_out, arm_prov = smooth_arm(
+            times, state[:, lay.pos], state[:, lay.quat], anchors, max_gap_s
+        )
+        out[:, lay.pos] = pos_out
+        out[:, lay.quat] = quat_out
+        prov[:, col] = arm_prov
+    return out, prov
+
+
+def regen_action(state_out: np.ndarray) -> np.ndarray:
+    """Rebuild the action matrix from smoothed state (adapter invariant
+    action == state[:, :16], spec §Architecture)."""
+    return np.array(state_out[:, :ACTION_DIM], copy=True)
+
+
+@dataclass(frozen=True)
+class ArmCoverage:
+    n: int
+    measured: int
+    interpolated: int
+    unfillable: int
+    gap_hist: dict[int, int]     # filled-gap length in frames -> count
+    longest_gap_s: float         # longest anchor-to-anchor span with a gap
+
+
+def arm_coverage(
+    times: np.ndarray, anchors: np.ndarray, provenance: np.ndarray
+) -> ArmCoverage:
+    times = np.asarray(times, dtype=float)
+    anchors = np.asarray(anchors, dtype=bool)
+    hist: dict[int, int] = {}
+    longest = 0.0
+    for a, b in bracketed_runs(anchors):
+        longest = max(longest, float(times[b] - times[a]))
+        if (provenance[a + 1:b] == INTERPOLATED).all():
+            n_frames = b - a - 1
+            hist[n_frames] = hist.get(n_frames, 0) + 1
+    return ArmCoverage(
+        n=len(times),
+        measured=int((provenance == MEASURED).sum()),
+        interpolated=int((provenance == INTERPOLATED).sum()),
+        unfillable=int((provenance == UNFILLABLE).sum()),
+        gap_hist=hist,
+        longest_gap_s=longest,
+    )

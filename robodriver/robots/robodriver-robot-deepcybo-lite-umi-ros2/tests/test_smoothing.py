@@ -104,3 +104,83 @@ def test_sign_flipped_anchor_takes_short_arc():
     err = (mid * Rotation.from_euler("z", 20, degrees=True).inv()).magnitude()
     assert np.degrees(err) < 1e-6       # 20 deg = short arc midpoint
     assert abs(np.linalg.norm(q_out[1]) - 1.0) < 1e-9
+
+
+from robodriver_robot_deepcybo_lite_umi_ros2.smoothing import (
+    ArmCoverage, arm_coverage, regen_action, smooth_state,
+)
+
+
+def _state(n=30, fps=30.0):
+    """Full 23-dim state with both arms following distinct trajectories."""
+    t = np.arange(n) / fps
+    s = np.zeros((n, 23), dtype=np.float32)
+    _, lp, lq = _traj(n, fps)
+    s[:, 0:3] = lp
+    s[:, 3:7] = lq
+    s[:, 7] = np.linspace(0, 1, n)                     # L gripper ramp
+    s[:, 8:11] = lp[:, [1, 0, 2]] * -1.0               # different R traj
+    s[:, 11:15] = Rotation.from_euler(
+        "x", 30.0 * t, degrees=True).as_quat()
+    s[:, 15] = np.linspace(1, 0, n)                    # R gripper ramp
+    s[:, 16] = 1.0; s[:, 17] = 1.0; s[:, 18] = 0.1     # L quality
+    s[:, 19] = 1.0; s[:, 20] = 1.0; s[:, 21] = 0.1     # R quality
+    s[:, 22] = 1.0
+    return t, s
+
+
+def test_smooth_state_arms_independent():
+    t, s = _state()
+    s[10:13, 16] = 0.0                 # left dropout only
+    s_in = s.copy()
+    out, prov = smooth_state(t, s_in, max_gap_s=0.25)
+    # right arm bit-exact everywhere
+    assert (out[:, 8:15] == s_in[:, 8:15]).all()
+    assert (prov[:, 1] == MEASURED).all()
+    # left gap interpolated
+    assert (prov[10:13, 0] == INTERPOLATED).all()
+    assert not (out[10:13, 0:7] == s_in[10:13, 0:7]).all()
+
+
+def test_smooth_state_passthrough_columns_untouched():
+    t, s = _state()
+    s[10:13, 16] = 0.0
+    s_in = s.copy()
+    out, _ = smooth_state(t, s_in, max_gap_s=0.25)
+    assert (out[:, 7] == s_in[:, 7]).all()      # L gripper
+    assert (out[:, 15] == s_in[:, 15]).all()    # R gripper
+    assert (out[:, 16:23] == s_in[:, 16:23]).all()  # quality dims byte-identical
+
+
+def test_smooth_state_rejects_bad_input():
+    t, s = _state()
+    with pytest.raises(ValueError):
+        smooth_state(t, s[:, :22], max_gap_s=0.25)   # wrong dim
+    t2 = t.copy(); t2[5] = t2[4]                      # non-monotonic
+    with pytest.raises(ValueError, match="monotonic"):
+        smooth_state(t2, s, max_gap_s=0.25)
+
+
+def test_regen_action_mirrors_first_16():
+    t, s = _state()
+    out, _ = smooth_state(t, s, max_gap_s=0.25)
+    a = regen_action(out)
+    assert a.shape == (len(s), 16)
+    assert (a == out[:, :16]).all()
+    a[0, 0] = 99.0                                    # must be a copy
+    assert out[0, 0] != 99.0
+
+
+def test_arm_coverage_counts_and_histogram():
+    t, s = _state()
+    s[5:7, 16] = 0.0      # 2-frame gap (fillable)
+    s[20:21, 16] = 0.0    # 1-frame gap (fillable)
+    anchors = s[:, 16] > 0.5
+    _, prov = smooth_state(t, s, max_gap_s=0.25)
+    cov = arm_coverage(t, anchors, prov[:, 0])
+    assert cov.n == 30
+    assert cov.measured == 27
+    assert cov.interpolated == 3
+    assert cov.unfillable == 0
+    assert cov.gap_hist == {2: 1, 1: 1}
+    assert cov.longest_gap_s == pytest.approx(t[7] - t[4])
