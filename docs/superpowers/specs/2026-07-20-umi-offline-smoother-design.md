@@ -118,12 +118,29 @@ record what the tracker saw, provenance records what the smoother did. Keeping
 both makes the output fully auditable. Overwriting `tracked`/`present` would make
 that history unrecoverable.
 
-> **Unverified assumption (de-risked by Task 1).** That `DoRobotDataset.create()`
-> accepts an arbitrary extra feature and round-trips it is consistent with how the
-> 7 quality dims work but is **not yet confirmed**. Task 1 is a spike that writes
-> and reads back a 2-dim extra feature before any smoothing logic is built.
-> Fallback if it fails: a sidecar `meta/provenance.jsonl` — same information, no
-> schema risk, no redesign.
+> **Schema assumption — partially verified in source, runtime spike still Task 1.**
+> The write path is name-agnostic by construction: `create()` merges the passed
+> features dict verbatim (`dorobot_dataset.py:413`; the feature sanity check is a
+> commented-out TODO), `validate_frame` checks presence/dtype/shape against that
+> same dict rather than a hardcoded schema (`utils/dataset.py:688`), and a
+> float32 (2,) feature maps to parquet through the identical
+> `datasets.Sequence` branch as `observation.state` (`utils/dataset.py:338`).
+> What source reading cannot prove is the **runtime round-trip** (stats
+> aggregation over the new key, reader behavior, downstream consumers) — the
+> a1da5dc v2.1/v3.0 bug lived exactly in that between-components space, hence
+> the spike. Fallback if it fails: a sidecar `meta/provenance.jsonl` — same
+> information, no schema risk, no redesign.
+>
+> Two consequences found while verifying:
+>
+> 1. **Declared ⇒ mandatory.** `validate_frame` checks feature *presence*: once
+>    `observation.provenance` is declared, every `add_frame()` must supply it.
+>    The smoother always can; the feature just can't be optional.
+> 2. **Training configs must exclude it** — same warning class as the 7 quality
+>    dims. A non-image `observation.*` key is liable to be auto-classified as a
+>    STATE input by LeRobot's feature→policy mapping. The spike must confirm how
+>    `lerobot_lite`'s `dataset_to_policy_features` treats the key, and the README
+>    warning extends to it: provenance is for filtering, never policy input.
 
 ## CLI
 
