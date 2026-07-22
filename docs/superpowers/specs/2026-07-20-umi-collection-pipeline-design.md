@@ -81,13 +81,27 @@ hour and settle both.
 
 | Check | Method | Failure it catches |
 |---|---|---|
+| **Wire routing** | cables physically clipped/routed out of the head cam's line of sight to both cubes | **the confirmed root cause of the 0.70 s dropout** in the 2026-07-15 recording — wires blocked the only visible marker face |
 | **Gripper sweep** | fully open→close→open each gripper; watch `/lite/joint_states` | the constant-0.0 stub; also confirms direction and units (encoders are connected but **unverified**) |
 | **3 camera rates** | all publishing; wrists at ~30 Hz | the 18–20 Hz wrist USB-bandwidth problem (fix: MJPEG `pixel_format`) |
-| **Tracking sanity** | `deepcybo-lite-umi-debug-overlay` + RViz; move each gripper through the work zone | mis-tracking and dead spots, found *before* recording 20 episodes into one |
+| **Face redundancy** | sweep each gripper through the working volume; confirm **≥ 2 marker faces detected** throughout, not merely that tracking succeeds | single-face states, where one obstruction ends tracking |
+| **Tracking sanity** | `deepcybo-lite-umi-debug-overlay` + RViz | mis-tracking and dead spots, found *before* recording 20 episodes into one |
 | **World tag** | visible, static, unoccluded | silent `world_fresh = 0` |
 
 The debug overlay built for the RViz pose-accuracy test is reused here as the
 pre-flight instrument; nothing new is needed.
+
+**Wire routing must be structural, not remembered.** The operator is
+concentrating on the manipulation, not the cabling, and "be careful" will not
+survive 150 episodes. Clip or route the cables so they physically cannot enter
+the sight line, then verify it as a pre-flight item.
+
+**Face redundancy is the deeper fix.** The wires were the trigger; the
+underlying fragility was that the cube had exactly one face visible at that
+moment, so a single obstruction ended tracking for 21 frames. With the wires
+fixed, the next obstruction — forearm, object, container rim — reproduces the
+same hole. Checking for ≥ 2 detected faces through the working volume is
+therefore a stronger pre-flight condition than "tracking works."
 
 ## Per-episode protocol (stage 1)
 
@@ -135,11 +149,26 @@ Run the smoother's coverage computation on the just-written parquet and gate on
 |---|---|---|
 | **Gripper moved** | value range > threshold | catches the 0.0 stub **and** a failed grasp — highest-value single check |
 | Picking arm (right) usable | **≥ 95%, zero unfillable** | the right arm already reached 100% usable post-smoothing on real data |
+| Picking arm **raw tracked** | **≥ 90%** | see "raw floor" below — smoothing must not become a crutch |
 | Steadying arm (left) usable | ≥ 90% | near-static role should comfortably beat its previous 74% |
 | 3 camera streams | present, frame counts match | the wrist-bandwidth failure mode |
 | Episode length | 5–20 s | runaway or aborted recordings |
+| **Manual review flag** | operator marks the episode good/bad | UMI's `check_result.txt` equivalent — catches task-level failures (dropped object, botched grasp) that no metric sees |
 
 Any failure → **redo the episode immediately.**
+
+**The raw-tracked floor exists so smoothing cannot mask a degrading rig.**
+Gating only on usable-after-smoothing would let raw coverage rot from 90% to 60%
+while the gate stayed green, because the smoother keeps recovering frames. The
+raw floor makes tracking degradation visible on the episode it starts, which is
+the point of at-the-rig QC. For reference, the 2026-07-15 recording had 82.1%
+raw on the picking arm — below this bar, and its worst dropout was a routing
+problem now fixed.
+
+**Manual review is not optional.** Every metric here is about *tracking* quality;
+none can tell whether the demonstration itself was any good. UMI drops episodes
+whose `check_result.txt != true`, and a policy trained on fumbled grasps learns
+to fumble.
 
 The gripper-range threshold is calibrated during the pilot: record one
 deliberate full open→close, measure the observed range, and set the bar at a
@@ -202,29 +231,85 @@ and its coverage report, `deepcybo-lite-umi-debug-overlay`,
 **New, small:**
 
 - an immediate per-episode QC checker (reads the just-written parquet, applies
-  the stage-2 bars, prints PASS/FAIL) — the pipeline's only genuinely new
-  critical component;
+  the stage-2 bars including the raw-tracked floor, prompts for the manual
+  review flag, prints PASS/FAIL) — the pipeline's only genuinely new critical
+  component;
 - a placement-cell prompter for systematic object-position coverage;
-- a session pre-flight checker (gripper sweep + camera rates), which may simply
-  be a checklist plus a topic-rate script rather than code.
+- a session pre-flight checker: camera rates and gripper sweep in script form;
+  wire routing and face redundancy as operator checks, with the face-redundancy
+  sweep read off the existing debug overlay;
+- a one-off latency measurement script (`GripperTrack` header stamp vs
+  wall-clock publish time) — run once during the pilot, not per session.
+
+The manual review flag needs somewhere to live. Store it per episode in the
+session log alongside the placement cell, not inside the dataset — it is
+collection metadata, and the dataset schema is already settled.
 
 ## Rotation representation
 
 Diffusion Policy predicts continuous values and has no notion that a quaternion
-must remain unit-norm, so a 6D rotation representation is the usual choice.
+must remain unit-norm, so a 6D rotation representation is the usual choice —
+and it is what UMI trains on (see the reference table above).
 
-Two findings bound this risk:
+One finding bounds the risk further: the recorded quaternions are **already
+continuous**. The 2026-07-15 episode has **zero hemisphere flips** across all
+consecutive tracked frames (minimum consecutive dot product 0.9992, consistent
+`qw` sign) on both arms, so no sign-alignment preprocessing is required.
+Re-confirm across the pilot's 10 episodes.
 
-- The recorded quaternions are **already continuous**: the 2026-07-15 episode has
-  **zero hemisphere flips** across all consecutive tracked frames (minimum
-  consecutive dot product 0.9992, consistent `qw` sign) on both arms. No
-  sign-alignment preprocessing is required. Re-confirm across the pilot's 10
-  episodes.
-- Converting quaternion → 6D is a **preprocessing pass over existing parquets**,
-  not a re-collection. It is cheap to apply retroactively.
+Since both this and the absolute→relative question are preprocessing passes over
+recorded parquets, neither is a **collection** risk. Both are decided before the
+first real training run.
 
-Therefore the representation decision is a pilot-time item for tidiness, **not a
-collection risk**.
+## Reference: what the original UMI does
+
+Read from `real-stanford/universal_manipulation_interface` (2026-07-20). Useful
+as a check on our decisions, not as a template — our tracking architecture
+differs on purpose.
+
+| Aspect | UMI | Us |
+|---|---|---|
+| Tracking | inside-out visual-**inertial** SLAM, localizing against a **prebuilt map** | outside-in ArUco from a fixed head cam, no IMU |
+| Dropout handling | **reject** the episode (> 10 lost frames); no filtering, no interpolation | smooth offline, reject only what is unrecoverable |
+| Lost-frame value | identity-quaternion sentinel — deliberately invalid | hold-last, flagged |
+| Data retained | **99%** | 74–82% raw tracked |
+| Deployment | chunk-wise, 10 Hz, **6 steps ≈ 0.6 s per inference**, no temporal ensembling | undecided (chunk-wise is now the strong default) |
+| Rotation | **6D** | quaternion |
+| Pose frame | **relative to the current gripper pose** | absolute, world-tag frame |
+| Latency | measured and explicitly compensated | **never measured** |
+
+Three consequences for this pipeline:
+
+1. **UMI's robustness techniques do not transfer.** Prebuilt maps,
+   relocalization, IMU dead-reckoning, and SLAM masking are all inside-out
+   methods. Our coverage problem is ours alone to solve — via wire routing, face
+   redundancy, and camera placement. This is why the pre-flight now checks both.
+2. **Rejecting rather than salvaging is not available to us at their threshold.**
+   UMI can discard episodes with > 10 lost frames because they achieve 99%. At
+   74–82% that rule would discard nearly everything, so the offline smoother is
+   the correct adaptation to a weaker tracking architecture — not a workaround.
+   The raw-tracked floor above is what keeps that honest.
+3. **Their quality-gate posture is worth copying even where their tracking is
+   not** — hence the manual-review flag and the reported statistics.
+
+### Latency (new, previously unconsidered)
+
+UMI treats latency as first-class: collection latency and deployment latency
+must match, or the policy encounters a different world than it trained on. Our
+camera → ArUco detect → compose → publish path has a real, **unmeasured** delay.
+
+Action: during the pilot, measure it — compare the `GripperTrack` header stamp
+(which carries the image capture time) against wall-clock publish time. Record
+the figure in the session log. It costs an afternoon and is needed for
+deployment regardless.
+
+### Pose representation (decide before training, not before collecting)
+
+UMI trains on **6D rotations, relative to the current gripper pose**. We record
+absolute quaternions. Both differences are **preprocessing passes over recorded
+parquets** — neither requires re-collection — but they change what the policy
+learns and should be settled before the first real training run. Raised with the
+mentor; not a collection blocker.
 
 ## Known blockers carried in
 
@@ -233,12 +318,17 @@ collection risk**.
 2. **Wrist cams ~18–20 Hz vs head ~28 Hz** — USB bandwidth. Fix is MJPEG
    `pixel_format` in usb_cam (config only). Confirm topology with `lsusb -t`;
    the working hypothesis is both wrist cams sharing one host controller.
-3. **Left-arm occlusion** — the 2026-07-15 recording contains a 0.70 s (21-frame)
-   unfillable dropout at frames 86–106. The head-cam JPEGs for those exact frames
-   are in the dataset; inspect them to identify the cause (true occlusion vs
-   grazing view angle vs motion blur) before assuming a fix. The steadying-arm
-   role plus workspace layout are expected to mitigate it; no filter recovers
-   0.7 s of missing information.
+3. **Left-arm occlusion — root cause identified.** The 2026-07-15 recording
+   contains a 0.70 s (21-frame) unfillable dropout at frames 86–106. Inspection
+   of those head-cam frames showed **the wires blocked the only visible marker
+   face**. Two independent fixes follow, both in the pre-flight above: structural
+   wire routing (the trigger) and face redundancy (the underlying fragility — one
+   visible face means one obstruction ends tracking). No filter recovers 0.7 s of
+   missing information; this was always a physical problem.
+
+   **Re-measure coverage after the fix.** If the pilot's raw tracked coverage
+   rises to ~95%+, we are in UMI's regime, where rare bad episodes are simply
+   rejected and the smoother becomes a safety net rather than a dependency.
 
 ## Non-goals
 
