@@ -82,6 +82,61 @@ umi-smooth-episodes --root <dataset> --dry-run                   # report only
 
 Design: `docs/superpowers/specs/2026-07-20-umi-offline-smoother-design.md`.
 
+## Collection QC (at-the-rig)
+
+The loop while collecting: record an episode, then immediately run
+`umi-qc-episode` against it, and either keep it or redo it while the object
+placement, lighting and hand motion still exist to be recreated.
+
+```bash
+umi-qc-episode --root <dataset> --picking-arm right --cell B3
+```
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | keep -- every gate (and, if prompted, the operator) passed |
+| 1 | redo -- a gate failed or the operator marked the demonstration bad |
+| 2 | tool error -- bad `--root`, unreadable dataset, or an interrupted prompt |
+
+Gates (one picking arm that must grasp, one steadying arm that may hold a
+container still):
+
+- `gripper_moved` -- the picking arm's gripper actually swept (catches a
+  constant-0.0 encoder stub and a demonstration where the grasp never
+  happened).
+- `picking_usable` / `steadying_usable` -- fraction of frames with a real or
+  smoother-reconstructed pose, per arm.
+- `picking_unfillable` -- picking-arm frames the smoother could not
+  reconstruct at all.
+- `picking_raw_tracked` / `steadying_raw_tracked` -- fraction of frames
+  *genuinely measured* (not reconstructed), per arm. This floor exists so
+  smoothing can never mask a rig that is quietly degrading while `usable`
+  stays green.
+- `cameras` -- all three camera streams present with one frame per recorded
+  step.
+- `duration` -- episode length within the expected window.
+
+All thresholds are overridable from the CLI (`--gripper-range-min`,
+`--picking-usable-min`, `--picking-max-unfillable`, `--picking-raw-tracked-min`,
+`--steadying-usable-min`, `--steadying-raw-tracked-min`, `--duration-min-s`,
+`--duration-max-s`) so a pilot session can calibrate bars that have no valid
+a-priori value -- notably the gripper-range bar, whose units depend on an
+encoder that isn't verified until the pilot runs.
+
+Every run appends a JSON-lines record (timestamp, dataset root, effective
+thresholds, operator, note, verdict) to a session log next to the dataset --
+`<root>.qc_log.jsonl` by default, overridable with `--session-log`. The
+dataset directory itself is never written to.
+
+Use `umi-placement-cells` alongside it to dictate a balanced, shuffled object
+placement per episode rather than relying on unassisted human randomization:
+
+```bash
+umi-placement-cells --rows 3 --cols 4 -n 30 --seed 0
+```
+
 ## send_action
 
 This robot is record-only: `send_action()` raises `NotImplementedError`.

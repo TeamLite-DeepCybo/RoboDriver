@@ -30,6 +30,10 @@ class QCThresholds:
     picking_max_unfillable: int = 0
     picking_raw_tracked_min: float = 0.90
     steadying_usable_min: float = 0.90
+    # 0.80, not 0.90: the steadying arm is near-static so it should track
+    # well, but its measured history is 74.2% (worse than the picking arm's
+    # 82.1%) -- a bar it has never met would reject every episode.
+    steadying_raw_tracked_min: float = 0.80
     duration_min_s: float = 5.0
     duration_max_s: float = 20.0
     n_cameras: int = 3
@@ -79,6 +83,7 @@ def evaluate_gates(
     pick_usable = usable_fraction(pick.measured, pick.interpolated, pick.n)
     steady_usable = usable_fraction(steady.measured, steady.interpolated, steady.n)
     pick_raw = raw_tracked_frac[picking_arm]
+    steady_raw = raw_tracked_frac[steadying_arm]
     grip = gripper_range[picking_arm]
 
     results = [
@@ -89,6 +94,12 @@ def evaluate_gates(
             f"{picking_arm} gripper range {grip:.3f} "
             f"(need > {t.gripper_range_min})",
         ),
+        # NOTE: with the spec default picking_max_unfillable == 0, this gate
+        # cannot itself fail: measured + interpolated + unfillable == n makes
+        # usable == (n - unfillable) / n, so unfillable > 0 already fails
+        # picking_unfillable below before usable could dip under the bar.
+        # Retained as a live gate for when picking_max_unfillable is raised
+        # above 0 (interpolation allowed on the picking arm).
         GateResult(
             "picking_usable", pick_usable >= t.picking_usable_min,
             f"{picking_arm} usable {pick_usable:.1%} "
@@ -110,6 +121,15 @@ def evaluate_gates(
             "steadying_usable", steady_usable >= t.steadying_usable_min,
             f"{steadying_arm} usable {steady_usable:.1%} "
             f"(need >= {t.steadying_usable_min:.0%})",
+        ),
+        # Raw floor for the steadying arm too: without this, the exact
+        # smoothing-crutch scenario the picking-arm floor exists to prevent
+        # (usable green while real tracking rots) is wide open on the arm
+        # that historically tracks worse (74.2% vs the picking arm's 82.1%).
+        GateResult(
+            "steadying_raw_tracked", steady_raw >= t.steadying_raw_tracked_min,
+            f"{steadying_arm} raw tracked {steady_raw:.1%} "
+            f"(need >= {t.steadying_raw_tracked_min:.0%})",
         ),
         GateResult(
             "cameras",

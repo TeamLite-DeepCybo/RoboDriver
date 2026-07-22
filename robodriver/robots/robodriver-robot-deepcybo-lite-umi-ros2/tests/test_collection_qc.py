@@ -1,4 +1,10 @@
+import sys
+from pathlib import Path
+
 import pytest
+
+sys.path.insert(0, str(Path(__file__).parent))
+from dataset_fixture import STATE_NAMES  # noqa: E402
 
 from robodriver_robot_deepcybo_lite_umi_ros2.collection_qc import (
     GRIPPER_COL, EpisodeQC, QCThresholds, evaluate_gates, format_qc,
@@ -31,6 +37,14 @@ def _kwargs(**over):
 
 def test_gripper_column_layout():
     assert GRIPPER_COL == {"left": 7, "right": 15}
+
+
+def test_gripper_column_matches_state_names():
+    # The real-dataset regression test (test_qc_real_episode.py) pins this
+    # too, but it skipifs away when the real recording is absent -- so on CI
+    # or the Linux rig nothing pins it. This test always runs.
+    assert STATE_NAMES[GRIPPER_COL["left"]] == "left_gripper.pos"
+    assert STATE_NAMES[GRIPPER_COL["right"]] == "right_gripper.pos"
 
 
 def test_usable_fraction():
@@ -82,6 +96,43 @@ def test_raw_tracked_floor_catches_smoothing_crutch():
         raw_tracked_frac={"left": 0.95, "right": 0.667}))
     assert not qc.passed
     assert [f.name for f in qc.failures] == ["picking_raw_tracked"]
+
+
+def test_steadying_raw_tracked_default():
+    assert QCThresholds().steadying_raw_tracked_min == pytest.approx(0.80)
+
+
+def test_steadying_raw_tracked_floor_catches_smoothing_crutch():
+    # The exact crutch scenario the picking-arm floor exists to prevent, now
+    # on the steadying (left) arm: usable is fine because smoothing
+    # recovered it, but raw tracking has rotted to 50%.
+    qc = evaluate_gates(**_kwargs(
+        coverage={"left": _cov(measured=150, interpolated=150, unfillable=0),
+                  "right": _cov()},
+        raw_tracked_frac={"left": 0.50, "right": 0.95}))
+    assert not qc.passed
+    assert [f.name for f in qc.failures] == ["steadying_raw_tracked"]
+
+
+def test_steadying_raw_tracked_exactly_at_min_passes():
+    qc = evaluate_gates(**_kwargs(raw_tracked_frac={"left": 0.80, "right": 0.95}))
+    assert "steadying_raw_tracked" not in [f.name for f in qc.failures]
+
+
+def test_steadying_raw_tracked_just_below_min_fails():
+    qc = evaluate_gates(**_kwargs(raw_tracked_frac={"left": 0.799, "right": 0.95}))
+    assert "steadying_raw_tracked" in [f.name for f in qc.failures]
+
+
+def test_steadying_raw_tracked_follows_picking_arm_swap():
+    # left picks, right steadies: a rotted right raw fraction must show up as
+    # steadying_raw_tracked, not be silently ignored by a hardcoded lookup.
+    qc = evaluate_gates(**_kwargs(
+        gripper_range={"left": 0.4, "right": 0.0},
+        raw_tracked_frac={"left": 0.95, "right": 0.50},
+        picking_arm="left"))
+    assert not qc.passed
+    assert "steadying_raw_tracked" in [f.name for f in qc.failures]
 
 
 def test_steadying_arm_has_its_own_looser_bar():
