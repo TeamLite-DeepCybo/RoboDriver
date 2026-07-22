@@ -114,12 +114,86 @@ def test_duration_out_of_range_fails(dur):
     assert "duration" in [f.name for f in qc.failures]
 
 
+@pytest.mark.parametrize("dur", [5.0, 20.0])
+def test_duration_exactly_on_boundary_passes(dur):
+    # duration gate is inclusive on both ends
+    qc = evaluate_gates(**_kwargs(duration_s=dur))
+    assert "duration" not in [f.name for f in qc.failures]
+
+
+def test_gripper_range_exactly_at_min_fails():
+    # gripper_moved is a strict '>', so sitting exactly on the bar fails
+    qc = evaluate_gates(**_kwargs(gripper_range={"left": 0.0, "right": 0.05}))
+    assert not qc.passed
+    assert "gripper_moved" in [f.name for f in qc.failures]
+
+
+def test_picking_usable_exactly_at_min_passes():
+    # picking_usable is inclusive '>=': measured+interpolated == 0.95 * n
+    qc = evaluate_gates(**_kwargs(
+        coverage={"left": _cov(), "right": _cov(measured=275, interpolated=10,
+                                                unfillable=0)}))
+    assert "picking_usable" not in [f.name for f in qc.failures]
+
+
+def test_picking_raw_tracked_exactly_at_min_passes():
+    # picking_raw_tracked is inclusive '>='
+    qc = evaluate_gates(**_kwargs(raw_tracked_frac={"left": 0.95, "right": 0.90}))
+    assert "picking_raw_tracked" not in [f.name for f in qc.failures]
+
+
+def test_steadying_usable_exactly_at_min_passes():
+    # steadying_usable is inclusive '>=': measured+interpolated == 0.90 * n
+    qc = evaluate_gates(**_kwargs(
+        coverage={"left": _cov(measured=260, interpolated=10, unfillable=0),
+                  "right": _cov()}))
+    assert "steadying_usable" not in [f.name for f in qc.failures]
+
+
 def test_picking_arm_can_be_left():
     # roles swapped: left picks, right steadies
     qc = evaluate_gates(**_kwargs(
         gripper_range={"left": 0.0, "right": 0.4}, picking_arm="left"))
     assert not qc.passed
     assert "gripper_moved" in [f.name for f in qc.failures]
+
+
+def test_picking_arm_left_uses_left_coverage_not_right():
+    # left picks with bad coverage, right (steadying) is clean. A hardcoded
+    # coverage["right"]/coverage["left"] lookup (ignoring picking_arm) would
+    # read the clean right-arm coverage as the "picking" one and pass.
+    qc = evaluate_gates(**_kwargs(
+        coverage={"left": _cov(measured=200, interpolated=80, unfillable=20),
+                  "right": _cov()},
+        gripper_range={"left": 0.4, "right": 0.0},
+        picking_arm="left"))
+    assert not qc.passed
+    names = [f.name for f in qc.failures]
+    assert "picking_usable" in names and "picking_unfillable" in names
+
+
+def test_picking_arm_left_uses_left_raw_tracked_not_right():
+    # left picks with a rotted raw-tracked fraction, right is clean. A
+    # hardcoded raw_tracked_frac["right"] lookup would read the clean value
+    # and pass instead of catching the smoothing crutch on the picking arm.
+    qc = evaluate_gates(**_kwargs(
+        gripper_range={"left": 0.4, "right": 0.0},
+        raw_tracked_frac={"left": 0.667, "right": 0.95},
+        picking_arm="left"))
+    assert not qc.passed
+    assert [f.name for f in qc.failures] == ["picking_raw_tracked"]
+
+
+def test_picking_arm_left_applies_steadying_bar_to_right():
+    # left picks, right steadies. Bad right-arm coverage must show up as
+    # steadying_usable, not as a picking-arm failure.
+    qc = evaluate_gates(**_kwargs(
+        coverage={"left": _cov(),
+                  "right": _cov(measured=200, interpolated=60, unfillable=40)},
+        gripper_range={"left": 0.4, "right": 0.0},
+        picking_arm="left"))
+    assert not qc.passed
+    assert [f.name for f in qc.failures] == ["steadying_usable"]
 
 
 def test_thresholds_are_overridable():

@@ -11,6 +11,10 @@ placement, lighting and hand motion cannot be recreated.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # avoids a runtime scipy import via .smoothing
+    from .smoothing import ArmCoverage
 
 # Gripper opening columns inside the 23-dim observation.state vector.
 # Restated here rather than imported (config.py needs the lerobot env); pinned
@@ -57,7 +61,7 @@ def usable_fraction(measured: int, interpolated: int, n: int) -> float:
 
 def evaluate_gates(
     *,
-    coverage: dict,
+    coverage: dict[str, "ArmCoverage"],
     raw_tracked_frac: dict[str, float],
     gripper_range: dict[str, float],
     camera_frame_counts: dict[str, int],
