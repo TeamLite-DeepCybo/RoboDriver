@@ -36,8 +36,9 @@ def test_real_episode_is_rejected_for_the_right_reasons():
     assert not qc.passed
     names = {f.name for f in qc.failures}
     # Left arm carries a 0.70 s dropout caused by wires blocking its only
-    # visible marker face, leaving 87.9% usable against a 90% bar.
-    expected_failures = {"gripper_moved", "picking_raw_tracked", "steadying_usable"}
+    # visible marker face, leaving 87.9% usable against a 90% bar and 74.2%
+    # raw tracked against an 0.80 steadying floor.
+    expected_failures = {"gripper_moved", "picking_raw_tracked", "steadying_raw_tracked", "steadying_usable"}
     assert names == expected_failures, (
         "Failure set mismatch: checker may have regressed or recording was replaced"
     )
