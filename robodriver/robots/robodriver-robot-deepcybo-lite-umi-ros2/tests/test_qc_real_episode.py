@@ -35,10 +35,12 @@ def test_real_episode_is_rejected_for_the_right_reasons():
     assert idx == 0
     assert not qc.passed
     names = {f.name for f in qc.failures}
-    # constant-0.0 gripper stub
-    assert "gripper_moved" in names
-    # right arm raw tracked 82.1%, below the 90% floor
-    assert "picking_raw_tracked" in names
+    # Left arm carries a 0.70 s dropout caused by wires blocking its only
+    # visible marker face, leaving 87.9% usable against a 90% bar.
+    expected_failures = {"gripper_moved", "picking_raw_tracked", "steadying_usable"}
+    assert names == expected_failures, (
+        "Failure set mismatch: checker may have regressed or recording was replaced"
+    )
 
 
 def test_real_episode_inputs_match_known_values():
