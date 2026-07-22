@@ -25,6 +25,8 @@ def balanced_sequence(
     rows: int, cols: int, n: int, seed: int | None = None
 ) -> list[str]:
     """n placements, balanced across the grid (max-min occupancy <= 1)."""
+    if n < 0:
+        raise ValueError(f"n must be non-negative, got {n}")
     cells = cell_names(rows, cols)
     rng = random.Random(seed)
     out: list[str] = []
@@ -46,10 +48,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=None)
     args = parser.parse_args(argv)
 
-    for i, cell in enumerate(
-        balanced_sequence(args.rows, args.cols, args.n, args.seed)
-    ):
-        print(f"episode {i:3d}   place object at {cell}")
+    try:
+        for i, cell in enumerate(
+            balanced_sequence(args.rows, args.cols, args.n, args.seed)
+        ):
+            print(f"episode {i:3d}   place object at {cell}")
+    except ValueError as exc:
+        parser.error(str(exc))
     return 0
 
 
