@@ -29,6 +29,7 @@ deepcybo-lite-umi-smoke-record = "robodriver_robot_deepcybo_lite_umi_ros2.smoke_
 deepcybo-lite-umi-visualize-episode = "robodriver_robot_deepcybo_lite_umi_ros2.visualize_episode:main"
 deepcybo-lite-umi-debug-overlay = "robodriver_robot_deepcybo_lite_umi_ros2.debug_overlay:main"
 umi-smooth-episodes = "robodriver_robot_deepcybo_lite_umi_ros2.smooth_episodes:main"
+umi-qc-episode = "robodriver_robot_deepcybo_lite_umi_ros2.qc_episode:main"
 
 [tool.setuptools.packages.find]
 include = ["robodriver_robot_deepcybo_lite_umi_ros2"]

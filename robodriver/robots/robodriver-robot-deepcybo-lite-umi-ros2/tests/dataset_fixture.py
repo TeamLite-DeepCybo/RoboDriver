@@ -31,6 +31,12 @@ STATE_NAMES = [
 ]
 ACTION_NAMES = STATE_NAMES[:16]
 
+# All three recorded camera streams (config.py's DeepcyboLiteUmiRos2RobotConfig
+# .cameras / README.md's `observation.images.{...}` feature contract). Every
+# episode gets one directory of tiny JPEGs per stream so qc_episode's
+# camera_frame_counts always sees all three.
+CAMERA_KEYS = ("image_head", "image_wrist_left", "image_wrist_right")
+
 
 def _fsl(arr2d: np.ndarray) -> pa.FixedSizeListArray:
     """(N, D) float array -> arrow fixed_size_list<float32>[D]."""
@@ -128,9 +134,12 @@ def make_tiny_dataset(
     features = {
         "action": {"dtype": "float32", "names": ACTION_NAMES, "shape": [16]},
         "observation.state": {"dtype": "float32", "names": STATE_NAMES, "shape": [23]},
-        "observation.images.image_head": {
-            "dtype": "image", "names": ["height", "width", "channels"],
-            "shape": [480, 640, 3],
+        **{
+            f"observation.images.{key}": {
+                "dtype": "image", "names": ["height", "width", "channels"],
+                "shape": [480, 640, 3],
+            }
+            for key in CAMERA_KEYS
         },
         "timestamp": {"dtype": "float32", "names": None, "shape": [1]},
         "frame_index": {"dtype": "int64", "names": None, "shape": [1]},
@@ -176,12 +185,13 @@ def make_tiny_dataset(
             table, root / "data" / "chunk-000" / f"episode_{e:06d}.parquet"
         )
 
-        img_dir = (
-            root / "images" / "observation.images.image_head" / f"episode_{e:06d}"
-        )
-        img_dir.mkdir(parents=True)
-        for i in range(n):
-            (img_dir / f"frame_{i:06d}.jpg").write_bytes(_JPG)
+        for key in CAMERA_KEYS:
+            img_dir = (
+                root / "images" / f"observation.images.{key}" / f"episode_{e:06d}"
+            )
+            img_dir.mkdir(parents=True)
+            for i in range(n):
+                (img_dir / f"frame_{i:06d}.jpg").write_bytes(_JPG)
 
         episodes_lines.append(
             json.dumps({"episode_index": e, "tasks": ["tiny"], "length": n})
