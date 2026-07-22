@@ -571,7 +571,9 @@ def _episode_parquet(root: Path, info: dict, episode_index: int) -> Path:
 def _camera_frame_counts(root: Path, episode_index: int) -> dict[str, int]:
     counts: dict[str, int] = {}
     for key in CAMERA_KEYS:
-        d = root / "images" / f"observation.{key}" / f"episode_{episode_index:06d}"
+        # NOTE: the on-disk convention is observation.images.<key>, verified
+        # against the real recording — NOT observation.<key>.
+        d = root / "images" / f"observation.images.{key}" / f"episode_{episode_index:06d}"
         if d.is_dir():
             counts[key] = sum(1 for p in d.iterdir() if p.is_file())
     return counts
