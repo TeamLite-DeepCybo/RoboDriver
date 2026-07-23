@@ -214,6 +214,53 @@ def test_frozen_pose_immune_to_subclass_inplace_mutation():
     )
 
 
+def test_frozen_outputs_are_independent_objects():
+    """Guards the CALLER-side aliasing hazard (as opposed to the subclass-side
+    hazard covered by `test_frozen_pose_immune_to_subclass_inplace_mutation`
+    above): `_emit`/the freeze branch used to hand back the exact array
+    objects retained in `self._last`/`self._frozen`, so every frozen tick's
+    `.pos`/`.quat` was literally the SAME ndarray. A downstream consumer that
+    does an in-place transform on one returned output (e.g. normalising it,
+    or reusing a buffer) would then silently corrupt every other frozen tick,
+    past and future -- the same class of silent pose corruption the
+    subclass-side fix claims to have eliminated, just approached from the
+    other side of the interface.
+    """
+    f = PassThrough(max_predict_frames=1)
+    _feed(f, 5)
+    f.update(5 / 30.0, [0.0, 0.0, 0.0], IDENT, tracked=False)  # predict, within budget
+    out1 = f.update(6 / 30.0, [0.0, 0.0, 0.0], IDENT, tracked=False)  # crosses budget -> freeze
+    assert out1.stale is True
+
+    # Snapshot the true frozen value BEFORE mutating out1, so the assertions
+    # below don't depend on hardcoding PassThrough's extrapolated number.
+    expected_pos = out1.pos.copy()
+    expected_quat = out1.quat.copy()
+
+    # Simulate a downstream consumer mutating a returned pose in place.
+    out1.pos[:] = [42.0, 42.0, 42.0]
+    out1.quat[:] = [42.0, 42.0, 42.0, 42.0]
+
+    out2 = f.update(7 / 30.0, [0.0, 0.0, 0.0], IDENT, tracked=False)  # another frozen tick
+    assert out2.stale is True
+
+    # The mutation of out1 must NOT leak into out2.
+    assert (out2.pos == expected_pos).all(), (
+        "frozen pose corrupted by caller-side in-place mutation of a prior output"
+    )
+    assert (out2.quat == expected_quat).all(), (
+        "frozen quat corrupted by caller-side in-place mutation of a prior output"
+    )
+
+    # Equal in value, but never the same object -- neither to each other nor
+    # to whatever the filter retains internally.
+    assert out1.pos is not out2.pos
+    assert out1.quat is not out2.quat
+    fresh = f.update(8 / 30.0, [0.0, 0.0, 0.0], IDENT, tracked=False)
+    assert (fresh.pos == out2.pos).all()
+    assert fresh.pos is not out2.pos
+
+
 def test_negative_max_predict_frames_raises():
     with pytest.raises(ValueError):
         PassThrough(max_predict_frames=-1)

@@ -76,11 +76,30 @@ class BasePoseFilter(ABC):
         that mutates its state array in place (e.g. a Kalman filter) must not
         be able to retroactively change an already-frozen, already-emitted
         pose.
+
+        The `FilterOutput` handed back is built from a SEPARATE copy (via
+        `_pack`), never the arrays stored in `_last`: a caller that mutates a
+        returned `.pos`/`.quat` in place must not be able to corrupt this
+        filter's retained state, nor any other output -- including a later
+        frozen tick -- that happens to share the same recorded pose.
         """
         p = np.array(pos, dtype=float, copy=True)
         q = np.array(quat, dtype=float, copy=True)
         self._last = (p, q)
-        return FilterOutput(p, q, stale, n_predicted)
+        return self._pack(p, q, stale, n_predicted)
+
+    def _pack(self, p: np.ndarray, q: np.ndarray, stale: bool,
+              n_predicted: int) -> FilterOutput:
+        """Build a `FilterOutput` from fresh copies of `p`/`q`.
+
+        Shared by `_emit` (packaging a just-recorded pose) and the freeze
+        branch of `update` (repeating `self._frozen`), so every returned
+        `FilterOutput` -- including every tick of a freeze -- owns its own
+        arrays. No array object is ever shared between the filter's internal
+        state (`_last`/`_frozen`) and a returned output, or between two
+        returned outputs.
+        """
+        return FilterOutput(p.copy(), q.copy(), stale, n_predicted)
 
     @property
     def initialized(self) -> bool:
@@ -111,7 +130,7 @@ class BasePoseFilter(ABC):
                 self._initialized = True
                 self._n_predicted = 0
                 self._frozen = None
-                return self._emit(p.copy(), q.copy(), False, 0)
+                return self._emit(p, q, False, 0)
             out_p, out_q = self._on_measurement(t, p, q)
             self._n_predicted = 0
             self._frozen = None
@@ -128,7 +147,7 @@ class BasePoseFilter(ABC):
                 # of creeping.
                 self._frozen = self._last
             p, q = self._frozen
-            return FilterOutput(p, q, True, self._n_predicted)
+            return self._pack(p, q, True, self._n_predicted)
 
         out_p, out_q = self._on_predict(t)
         return self._emit(out_p, out_q, False, self._n_predicted)
