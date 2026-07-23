@@ -807,9 +807,22 @@ FILTERS = [OneEuroPoseFilter, EkfPoseFilter]
 
 
 @pytest.mark.parametrize("cls", FILTERS)
-def test_reversal_during_occlusion_error_is_bounded(cls):
-    """Move forward, occlude, reverse. Error must stay far below the 17.8 cm
-    regime, because the filter freezes instead of extrapolating."""
+def test_reversal_during_occlusion_commands_no_motion(cls):
+    """Move forward, occlude, reverse.
+
+    The safety property is that the filter STOPS COMMANDING MOTION, not that
+    hand-vs-arm divergence stays small: once frozen, that divergence is just
+    how far the operator's hand kept moving, which grows without bound and is
+    not something the filter can control. What the filter controls is its own
+    output -- so that is what is asserted:
+
+      * while predicting (stale=False) the output stays close to truth
+      * once stale, the output does not move at all, however long the
+        occlusion lasts and however far the hand travels
+
+    Asserting a bound on divergence instead would make the test fail for a
+    longer occlusion even though freezing worked perfectly.
+    """
     f = cls()
     v = 0.124                       # m/s, the rig's median hand speed
     truth, k = 0.0, 0
@@ -817,15 +830,29 @@ def test_reversal_during_occlusion_error_is_bounded(cls):
         f.update(k / FPS, [truth, 0.0, 0.0], IDENT, True)
         truth += v / FPS
         k += 1
-    worst = 0.0
-    for _ in range(30):             # occluded AND reversing
+
+    live_err = 0.0
+    frozen_positions = []
+    for _ in range(60):             # occluded AND reversing, for a long time
         out = f.update(k / FPS, [0.0, 0.0, 0.0], IDENT, False)
         truth -= v / FPS
-        worst = max(worst, abs(out.pos[0] - truth))
+        if out.stale:
+            frozen_positions.append(out.pos.copy())
+        else:
+            live_err = max(live_err, abs(out.pos[0] - truth))
         k += 1
-    # freezing bounds the error at "how far the hand actually moved";
-    # extrapolating would roughly double it
-    assert worst < 0.15, f"{cls.__name__} drifted {worst*100:.1f} cm"
+
+    # predicted frames are only a few mm off -- this is the regime the
+    # 3-frame budget is chosen to keep us inside
+    assert live_err < 0.02, f"{cls.__name__} predicted {live_err*100:.1f} cm off"
+
+    # and once frozen the commanded pose is perfectly still, no matter that
+    # the hand has by now travelled far in the opposite direction
+    assert len(frozen_positions) > 50
+    for p in frozen_positions[1:]:
+        assert (p == frozen_positions[0]).all(), (
+            f"{cls.__name__} kept moving while stale"
+        )
 
 
 @pytest.mark.parametrize("cls", FILTERS)
