@@ -10,6 +10,21 @@ jitter to zero by smoothing harder, it simply becomes unusable because the arm
 lags the operator's hand. The design question is the TRADE, so each filter is
 swept across its parameters and the results read as a jitter-vs-lag frontier --
 "at equal lag, which gives less jitter?"
+
+Jitter, lag and overshoot are measured on DIFFERENT inputs, on purpose:
+  - jitter is a property of the SENSOR NOISE, so it is measured on the real
+    recording (median deviation from a local moving average, over
+    consecutively-tracked runs -- see `jitter_mm`).
+  - lag and overshoot are properties of the FILTER'S DYNAMICS, so they are
+    measured on controlled SYNTHETIC motion instead (`synthetic_ramp_lag`,
+    `synthetic_step_overshoot`). The available recording covers only ~3.3-3.5
+    cm of total travel over 8 s -- the hand jiggled in place rather than
+    reaching -- so lag is not observable on it at all: the frame-quantised
+    cross-correlation `lag_ms` computes lands at 0 frames for nearly every
+    configuration on that recording, even for settings independently measured
+    at 31.8 mm (~106 ms) of lag on a moving signal. `lag_ms`/`overshoot_frac`
+    remain here, correct, for a future recording with real reaching motion;
+    the decision table below relies on the synthetic measurements instead.
 """
 from __future__ import annotations
 
@@ -25,21 +40,51 @@ from .pose_filter import EkfPoseFilter, OneEuroPoseFilter
 from .smoothing import ARM_LAYOUT
 
 
-def jitter_mm(pos: np.ndarray) -> float:
-    """Mean deviation from a 5-sample centred moving average, in mm.
+def jitter_mm(pos: np.ndarray, tracked: np.ndarray) -> float:
+    """Median deviation from a 5-sample centred moving average, in mm.
 
-    Same measure that gave the 2.67/3.15 mm raw baseline on the real rig.
+    Computed only within runs of consecutively TRACKED frames: held/frozen
+    duplicate frames, and the position jump at reacquisition, are not sensor
+    jitter, so they must not contribute to it. Each run supplies its own
+    local moving average (never spanning outside the run), and the 5-mm
+    baseline is the MEDIAN over all runs pooled together, not a per-array
+    mean -- this is the design spec's measurement method (docs/superpowers/
+    specs/2026-07-22-online-pose-filter-design.md), and is what reproduces
+    its quoted 2.67 mm (left) / 3.15 mm (right) raw baseline; a mean over the
+    whole array including untracked frames does not.
     """
     pos = np.asarray(pos, dtype=float)
-    if len(pos) < 5:
-        return 0.0
-    dev = [np.linalg.norm(pos[i] - pos[i - 2:i + 3].mean(axis=0))
-           for i in range(2, len(pos) - 2)]
-    return float(np.mean(dev) * 1000.0)
+    tracked = np.asarray(tracked, dtype=bool)
+    if len(pos) != len(tracked):
+        raise ValueError("pos and tracked must have the same length")
+    devs: list[float] = []
+    n = len(pos)
+    i = 0
+    while i < n:
+        if not tracked[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and tracked[j]:
+            j += 1
+        run = pos[i:j]
+        if len(run) >= 5:
+            devs.extend(
+                float(np.linalg.norm(run[k] - run[k - 2:k + 3].mean(axis=0)))
+                for k in range(2, len(run) - 2)
+            )
+        i = j
+    return float(np.median(devs) * 1000.0) if devs else 0.0
 
 
 def lag_ms(raw: np.ndarray, filt: np.ndarray, fps: float) -> float:
-    """Frame shift of `filt` vs `raw` minimising squared error, in ms."""
+    """Frame shift of `filt` vs `raw` minimising squared error, in ms.
+
+    Correct, but only informative when `raw` actually moves enough for the
+    cross-correlation optimum to be non-flat -- see the module docstring.
+    Not used for the decision table; kept for a future recording with real
+    reaching motion. `synthetic_ramp_lag` below is what the table uses.
+    """
     raw = np.asarray(raw, float)
     filt = np.asarray(filt, float)
     best_k, best_err = 0, np.inf
@@ -51,7 +96,13 @@ def lag_ms(raw: np.ndarray, filt: np.ndarray, fps: float) -> float:
 
 
 def overshoot_frac(raw: np.ndarray, filt: np.ndarray) -> float:
-    """Max excursion of `filt` past `raw`'s range, as a fraction of its span."""
+    """Max excursion of `filt` past `raw`'s range, as a fraction of its span.
+
+    Needs a clean excursion to measure against; the real recording has none
+    (see the module docstring), so this is not used on it for the decision
+    table. Kept for a future recording with real reaching motion, and reused
+    directly by `synthetic_step_overshoot` below on synthetic step data.
+    """
     raw = np.asarray(raw, float)
     filt = np.asarray(filt, float)
     span = float(np.linalg.norm(raw.max(axis=0) - raw.min(axis=0)))
@@ -68,9 +119,10 @@ def overshoot_frac(raw: np.ndarray, filt: np.ndarray) -> float:
 class BenchResult:
     name: str
     params: str
-    jitter_mm: float
-    lag_ms: float
-    overshoot: float
+    jitter_mm: float        # REAL data: median dev., consecutively-tracked runs
+    lag_mm_synth: float      # SYNTHETIC 0.3 m/s ramp: steady-state positional lag
+    lag_ms_synth: float      # same, as time: lag_mm_synth / v
+    overshoot_synth: float   # SYNTHETIC step: overshoot fraction
     n_frames: int
     n_stale: int
 
@@ -93,6 +145,65 @@ def run_filter(pos, quat, tracked, times, filter_factory):
             p_out[i] = out.pos
             q_out[i] = out.quat
     return p_out, q_out, stale
+
+
+_IDENT_QUAT = np.array([0.0, 0.0, 0.0, 1.0])
+
+
+def synthetic_ramp_lag(filter_factory, v: float = 0.3, fps: float = 30.0,
+                       n: int = 200) -> tuple[float, float]:
+    """Steady-state lag of `filter_factory` on a noiseless constant-velocity ramp.
+
+    Lag is a property of the filter's DYNAMICS, not the sensor noise, so it
+    is measured on controlled synthetic motion rather than on the real
+    recording -- see the module docstring for why lag is not observable
+    there at all.
+
+    Measures the steady-state POSITIONAL offset directly: the mean of
+    (raw - filtered) position over the back half of the run, once the
+    initial transient has settled. This is deliberately NOT `lag_ms`'s
+    frame-quantised cross-correlation -- a positional difference has
+    sub-frame precision, so it resolves lag differences smaller than one
+    frame interval (33 ms at 30 Hz), which cross-correlation cannot.
+
+    `v=0.3` m/s and `n=200` (frames at 30 Hz => ~6.7 s) are a representative
+    teleop speed and enough frames to reach steady state for the filter
+    settings this benchmark sweeps; a caller characterising much heavier
+    smoothing (a much lower cutoff / longer time constant) should pass a
+    larger `n` so the back-half tail window starts after the transient has
+    actually settled.
+
+    Returns (lag_mm, lag_ms), with lag_ms = lag_mm / v.
+    """
+    dt = 1.0 / fps
+    times = np.arange(n) * dt
+    pos = np.stack([v * times, np.zeros(n), np.zeros(n)], axis=1)
+    quat = np.tile(_IDENT_QUAT, (n, 1))
+    tracked = np.ones(n, dtype=bool)
+    filt, _, _ = run_filter(pos, quat, tracked, times, filter_factory)
+    tail = slice(n // 2, n)
+    lag_mm = float(np.mean(pos[tail, 0] - filt[tail, 0]) * 1000.0)
+    return lag_mm, lag_mm / v
+
+
+def synthetic_step_overshoot(filter_factory, fps: float = 30.0,
+                            n: int = 200, step_m: float = 0.05) -> float:
+    """Overshoot of `filter_factory` on a synthetic step input.
+
+    Overshoot, like lag, is a property of the filter's dynamics, so it is
+    measured on controlled synthetic motion instead of the real recording,
+    which has no clean step to measure against (see the module docstring).
+    Reuses `overshoot_frac` on a synthetic raw/filtered pair rather than
+    duplicating its logic.
+    """
+    dt = 1.0 / fps
+    times = np.arange(n) * dt
+    raw = np.zeros((n, 3))
+    raw[n // 4:, 0] = step_m
+    quat = np.tile(_IDENT_QUAT, (n, 1))
+    tracked = np.ones(n, dtype=bool)
+    filt, _, _ = run_filter(raw, quat, tracked, times, filter_factory)
+    return overshoot_frac(raw, filt)
 
 
 def _sweep():
@@ -127,27 +238,38 @@ def _load_arm(root: Path, arm: str, episode: int):
 def bench_dataset(root: Path, arm: str = "right",
                   episode: int = 0) -> list[BenchResult]:
     pos, quat, tracked, times, fps = _load_arm(Path(root), arm, episode)
-    results = [BenchResult("raw", "-", jitter_mm(pos), 0.0, 0.0,
-                           len(times), 0)]
+    results = [BenchResult("raw", "-", jitter_mm(pos, tracked),
+                           0.0, 0.0, 0.0, len(times), 0)]
     for name, params, factory in _sweep():
         p, _, stale = run_filter(pos, quat, tracked, times, factory)
+        lag_mm, lag_ms_synth = synthetic_ramp_lag(factory)
         results.append(BenchResult(
-            name, params, jitter_mm(p), lag_ms(pos, p, fps),
-            overshoot_frac(pos, p), len(times), int(stale.sum()),
+            name, params, jitter_mm(p, tracked), lag_mm, lag_ms_synth,
+            synthetic_step_overshoot(factory), len(times), int(stale.sum()),
         ))
     return results
 
 
 def format_bench(results: list[BenchResult]) -> str:
-    lines = [f"{'filter':<10} {'params':<28} {'jitter(mm)':>11} "
-             f"{'lag(ms)':>8} {'overshoot':>10} {'stale':>6}"]
-    lines.append("-" * 78)
+    header = (f"{'filter':<10} {'params':<28} {'jitter_REAL(mm)':>16} "
+              f"{'lag_SYNTH(mm)':>14} {'lag_SYNTH(ms)':>14} "
+              f"{'overshoot_SYNTH':>16} {'stale':>6}")
+    lines = [header, "-" * len(header)]
     for r in results:
-        lines.append(f"{r.name:<10} {r.params:<28} {r.jitter_mm:>11.2f} "
-                     f"{r.lag_ms:>8.1f} {r.overshoot:>10.1%} {r.n_stale:>6d}")
+        lines.append(
+            f"{r.name:<10} {r.params:<28} {r.jitter_mm:>16.2f} "
+            f"{r.lag_mm_synth:>14.2f} {r.lag_ms_synth:>14.1f} "
+            f"{r.overshoot_synth:>16.1%} {r.n_stale:>6d}")
     lines.append("")
-    lines.append("At comparable lag, lower jitter wins. Overshoot > ~5% means "
-                 "the filter rings after fast motion.")
+    lines.append(
+        "jitter_REAL = median deviation from a local 5-frame moving average, "
+        "over consecutively-tracked runs of the REAL recording. "
+        "lag_SYNTH / overshoot_SYNTH = measured on a SYNTHETIC 0.3 m/s ramp "
+        "/ step, not the real recording: the real recording covers only "
+        "~3.3-3.5 cm of travel over 8 s, too little motion for lag to be "
+        "observable at all (the hand jiggled in place rather than reaching). "
+        "At comparable lag, lower jitter wins. Overshoot > ~5% means the "
+        "filter rings after fast motion.")
     return "\n".join(lines)
 
 
