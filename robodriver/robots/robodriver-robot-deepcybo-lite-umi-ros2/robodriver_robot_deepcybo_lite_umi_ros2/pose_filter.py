@@ -151,3 +151,87 @@ class BasePoseFilter(ABC):
 
         out_p, out_q = self._on_predict(t)
         return self._emit(out_p, out_q, False, self._n_predicted)
+
+
+from scipy.spatial.transform import Rotation
+
+
+def _alpha(cutoff: float, dt: float) -> float:
+    tau = 1.0 / (2.0 * np.pi * cutoff)
+    return 1.0 / (1.0 + tau / dt)
+
+
+class _OneEuroChannel:
+    """Streaming 1e filter over a flat D-vector (Casiez et al.).
+
+    Cutoff rises with speed: smooth hard when slow (jitter is visible), get
+    out of the way when fast (lag is what you notice).
+    """
+
+    def __init__(self, min_cutoff: float, beta: float, d_cutoff: float):
+        self.min_cutoff, self.beta, self.d_cutoff = min_cutoff, beta, d_cutoff
+        self.x_prev: np.ndarray | None = None
+        self.dx_prev: np.ndarray | None = None
+
+    def reset(self, x0: np.ndarray) -> None:
+        self.x_prev = np.array(x0, dtype=float)
+        self.dx_prev = np.zeros_like(self.x_prev)
+
+    def update(self, x: np.ndarray, dt: float) -> np.ndarray:
+        x = np.asarray(x, dtype=float)
+        dt = max(dt, 1e-6)
+        dx = (x - self.x_prev) / dt
+        a_d = _alpha(self.d_cutoff, dt)
+        dx_hat = a_d * dx + (1.0 - a_d) * self.dx_prev
+        cutoff = self.min_cutoff + self.beta * np.abs(dx_hat)
+        a = _alpha(cutoff, dt)
+        x_hat = a * x + (1.0 - a) * self.x_prev
+        self.x_prev, self.dx_prev = x_hat, dx_hat
+        return x_hat
+
+
+class OneEuroPoseFilter(BasePoseFilter):
+    """1e filter on position, and on orientation in the tangent space.
+
+    Orientation is filtered as the rotation VECTOR of the delta from the last
+    filtered orientation, which stays on the manifold by construction — no
+    renormalisation and no hemisphere handling.
+    """
+
+    def __init__(self, min_cutoff: float = 1.0, beta: float = 0.4,
+                 d_cutoff: float = 1.0, max_predict_frames: int = 3):
+        self._mc, self._beta, self._dc = min_cutoff, beta, d_cutoff
+        super().__init__(max_predict_frames=max_predict_frames)
+
+    def reset(self) -> None:
+        super().reset()
+        self._pos_f = _OneEuroChannel(self._mc, self._beta, self._dc)
+        self._rot_f = _OneEuroChannel(self._mc, self._beta, self._dc)
+        self._t = None
+        self._p = None
+        self._R = None
+        self._v = np.zeros(3)
+
+    def _on_first(self, t, pos, quat):
+        self._t = t
+        self._p = np.array(pos, dtype=float)
+        self._R = Rotation.from_quat(np.asarray(quat, dtype=float))
+        self._pos_f.reset(self._p)
+        self._rot_f.reset(np.zeros(3))
+        self._v = np.zeros(3)
+
+    def _on_measurement(self, t, pos, quat):
+        dt = max(t - self._t, 1e-6)
+        p_new = self._pos_f.update(pos, dt)
+        self._v = (p_new - self._p) / dt
+        self._p, self._t = p_new, t
+
+        R_meas = Rotation.from_quat(np.asarray(quat, dtype=float))
+        delta = (R_meas * self._R.inv()).as_rotvec()
+        delta_f = self._rot_f.update(delta, dt)
+        self._R = Rotation.from_rotvec(delta_f) * self._R
+        return self._p, self._R.as_quat()
+
+    def _on_predict(self, t):
+        dt = max(t - self._t, 0.0)
+        return self._p + self._v * dt, self._R.as_quat()

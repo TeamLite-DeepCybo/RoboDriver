@@ -269,3 +269,103 @@ def test_negative_max_predict_frames_raises():
 def test_zero_max_predict_frames_does_not_raise():
     f = PassThrough(max_predict_frames=0)
     assert f.max_predict_frames == 0
+
+
+from robodriver_robot_deepcybo_lite_umi_ros2.pose_filter import OneEuroPoseFilter
+
+
+def _ramp(f, n=60, fps=30.0, v=0.3, noise=0.0, seed=0):
+    """Feed a constant-velocity x-ramp with optional noise; return positions."""
+    rng = np.random.default_rng(seed)
+    out = []
+    for k in range(n):
+        t = k / fps
+        p = np.array([v * t, 0.0, 0.0])
+        if noise:
+            p = p + rng.normal(0, noise, 3)
+        out.append(f.update(t, p, IDENT, True).pos)
+    return np.array(out)
+
+
+def test_one_euro_tracks_ramp_slope_with_bounded_offset():
+    """A low-pass CANNOT track a ramp without positional offset -- it trails by
+    roughly v*tau by construction (~43 mm at 0.3 m/s with the default cutoff).
+    Demanding near-zero offset would be demanding that it not filter.
+
+    What must hold is that it tracks the SLOPE: in steady state the output
+    velocity equals the input velocity, and the offset is constant rather than
+    growing. That is what catches sign errors and broken state updates, which
+    is what this test is for.
+
+    (The EKF's equivalent test DOES assert near-zero lag, because a
+    constant-velocity model has a velocity state and tracks a ramp losslessly.
+    The difference is real and shows up in the benchmark.)
+    """
+    v, fps = 0.3, 30.0
+    f = OneEuroPoseFilter()
+    got = _ramp(f, n=120, fps=fps, v=v)
+    truth = np.array([v * (k / fps) for k in range(120)])
+
+    # slope tracked exactly in steady state
+    out_v = np.diff(got[60:, 0]) * fps
+    assert np.allclose(out_v, v, atol=1e-3)
+
+    # offset is constant (not growing) and of the expected magnitude
+    offset = truth[60:] - got[60:, 0]
+    assert offset.std() < 1e-4, "offset must be constant, not drifting"
+    assert 0.005 < offset.mean() < 0.10
+
+
+def test_one_euro_reduces_jitter():
+    noise = 0.004                       # 4 mm, the rig's measured noise floor
+    raw = _ramp(OneEuroPoseFilter(min_cutoff=1e9, beta=0.0), n=120, noise=noise)
+    filt = _ramp(OneEuroPoseFilter(min_cutoff=0.5, beta=0.0), n=120, noise=noise)
+
+    def hf(a):                          # deviation from a 5-sample moving mean
+        return np.mean([np.linalg.norm(a[i] - a[i - 2:i + 3].mean(0))
+                        for i in range(2, len(a) - 2)])
+
+    assert hf(filt) < 0.5 * hf(raw)
+
+
+def test_one_euro_step_response_settles_without_oscillation():
+    f = OneEuroPoseFilter()
+    for k in range(20):
+        f.update(k / 30.0, [0.0, 0.0, 0.0], IDENT, True)
+    xs = [f.update((20 + k) / 30.0, [1.0, 0.0, 0.0], IDENT, True).pos[0]
+          for k in range(60)]
+    assert xs[-1] == pytest.approx(1.0, abs=1e-2)
+    assert max(xs) <= 1.0 + 1e-6        # no overshoot: it is a low-pass
+
+
+def test_one_euro_output_quaternion_is_unit_norm():
+    f = OneEuroPoseFilter()
+    for k in range(120):
+        q = Rotation.from_euler("z", 2.0 * k, degrees=True).as_quat()
+        out = f.update(k / 30.0, [0.0, 0.0, 0.0], q, True)
+    assert np.linalg.norm(out.quat) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_one_euro_rotation_converges_to_truth_short_arc():
+    f = OneEuroPoseFilter(min_cutoff=5.0)
+    target = Rotation.from_euler("z", 40, degrees=True)
+    for k in range(200):
+        out = f.update(k / 30.0, [0.0, 0.0, 0.0], target.as_quat(), True)
+    err = (Rotation.from_quat(out.quat) * target.inv()).magnitude()
+    assert np.degrees(err) < 1.0        # 40 deg, not 320: short arc
+
+
+def test_one_euro_rotation_does_not_perturb_position():
+    f = OneEuroPoseFilter()
+    for k in range(60):
+        q = Rotation.from_euler("x", 3.0 * k, degrees=True).as_quat()
+        out = f.update(k / 30.0, [0.5, -0.25, 0.75], q, True)
+    assert out.pos == pytest.approx([0.5, -0.25, 0.75], abs=1e-6)
+
+
+def test_one_euro_position_does_not_perturb_orientation():
+    f = OneEuroPoseFilter()
+    for k in range(60):
+        out = f.update(k / 30.0, [0.05 * k, 0.0, 0.0], IDENT, True)
+    err = (Rotation.from_quat(out.quat) * Rotation.identity().inv()).magnitude()
+    assert np.degrees(err) < 1e-6
