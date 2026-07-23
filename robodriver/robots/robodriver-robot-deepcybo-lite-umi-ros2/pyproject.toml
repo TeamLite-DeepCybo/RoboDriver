@@ -31,6 +31,7 @@ deepcybo-lite-umi-debug-overlay = "robodriver_robot_deepcybo_lite_umi_ros2.debug
 umi-smooth-episodes = "robodriver_robot_deepcybo_lite_umi_ros2.smooth_episodes:main"
 umi-qc-episode = "robodriver_robot_deepcybo_lite_umi_ros2.qc_episode:main"
 umi-placement-cells = "robodriver_robot_deepcybo_lite_umi_ros2.placement_cells:main"
+umi-filter-bench = "robodriver_robot_deepcybo_lite_umi_ros2.filter_bench:main"
 
 [tool.setuptools.packages.find]
 include = ["robodriver_robot_deepcybo_lite_umi_ros2"]
