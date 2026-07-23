@@ -862,9 +862,20 @@ def test_reversal_during_occlusion_commands_no_motion(cls):
             live_err = max(live_err, abs(out.pos[0] - truth))
         k += 1
 
-    # predicted frames are only a few mm off -- this is the regime the
-    # 3-frame budget is chosen to keep us inside
-    assert live_err < 0.02, f"{cls.__name__} predicted {live_err*100:.1f} cm off"
+    # Predicted-frame error during a reversal is bounded by PHYSICS, not by
+    # filter quality: the filter extrapolates forward at +v while truth moves
+    # at -v, so after n predicted frames the gap is at most 2*v*n/fps. That
+    # ceiling IS what the predict budget costs in the worst case, so assert
+    # against it rather than a magic number -- and it stays correct if
+    # max_predict_frames or the test speed changes.
+    #
+    # A filter with a lagged velocity estimate (One-Euro) comes in under this
+    # by accident, not by design; an accurate one (EKF) approaches it.
+    ceiling = 2.0 * v * f.max_predict_frames / FPS
+    assert live_err <= ceiling * 1.05, (
+        f"{cls.__name__} predicted {live_err*100:.2f} cm off, "
+        f"above the {ceiling*100:.2f} cm physical ceiling"
+    )
 
     # and once frozen the commanded pose is perfectly still, no matter that
     # the hand has by now travelled far in the opposite direction
