@@ -69,9 +69,16 @@ class BasePoseFilter(ABC):
 
         `_last` holds the exact arrays most recently emitted, so freezing can
         repeat them bit-identically rather than recomputing (which would drift).
+
+        Uses a genuine copy (not `np.asarray`, which returns the SAME object
+        when the input is already a float64 ndarray) so `_last`/`_frozen` can
+        never alias a subclass's mutable internal state -- a subclass hook
+        that mutates its state array in place (e.g. a Kalman filter) must not
+        be able to retroactively change an already-frozen, already-emitted
+        pose.
         """
-        p = np.asarray(pos, dtype=float)
-        q = np.asarray(quat, dtype=float)
+        p = np.array(pos, dtype=float, copy=True)
+        q = np.array(quat, dtype=float, copy=True)
         self._last = (p, q)
         return FilterOutput(p, q, stale, n_predicted)
 

@@ -161,3 +161,64 @@ def test_determinism():
     rb = [_feed(b, 1, start=k) for k in range(20)]
     for x, y in zip(ra, rb):
         assert (x.pos == y.pos).all()
+
+
+class MutatingInPlace(BasePoseFilter):
+    """Subclass whose hooks return a REFERENCE to persistent internal state
+    that is mutated in place on each call, rather than reallocating a fresh
+    array -- the natural (and desirable, for performance) way to implement a
+    real Kalman filter's state vector.
+
+    Exists solely to expose the `_emit` aliasing hazard: `np.asarray` does
+    NOT copy an input that is already a float64 ndarray, so if `_emit` used
+    it directly, `self._last` (and therefore `self._frozen`, since freezing
+    does `self._frozen = self._last`) would hold the SAME array object the
+    subclass keeps mutating. A later in-place update to that internal state
+    would then silently corrupt a pose already frozen and emitted to drive
+    the arm -- exactly the regression this test guards against.
+    """
+
+    def _on_first(self, t, pos, quat):
+        self._p = np.array(pos, dtype=float)
+        self._q = np.array(quat, dtype=float)
+        self._t = t
+
+    def _on_measurement(self, t, pos, quat):
+        self._p[:] = pos      # in-place mutation, no reallocation
+        self._q[:] = quat
+        self._t = t
+        return self._p, self._q
+
+    def _on_predict(self, t):
+        return self._p, self._q   # live reference to internal state
+
+
+def test_frozen_pose_immune_to_subclass_inplace_mutation():
+    f = MutatingInPlace(max_predict_frames=1)
+    f.update(0.0, [0.0, 0.0, 0.0], IDENT, tracked=True)         # _on_first
+    f.update(1 / 30.0, [1.0, 0.0, 0.0], IDENT, tracked=True)    # _on_measurement
+    f.update(2 / 30.0, [1.0, 0.0, 0.0], IDENT, tracked=False)   # predict, within budget
+    frozen_out = f.update(3 / 30.0, [1.0, 0.0, 0.0], IDENT, tracked=False)  # crosses budget -> freeze
+    assert frozen_out.stale is True
+    frozen_pos = frozen_out.pos
+    assert (frozen_pos == np.array([1.0, 0.0, 0.0])).all()
+
+    # A brand-new tracked measurement drives the subclass to mutate its
+    # internal array in place. The pose we already captured as "frozen" and
+    # handed to the (hypothetical) arm controller must NOT change as a
+    # side effect.
+    f.update(4 / 30.0, [9.0, 9.0, 9.0], IDENT, tracked=True)
+
+    assert (frozen_pos == np.array([1.0, 0.0, 0.0])).all(), (
+        "frozen pose mutated via aliasing with subclass internal state"
+    )
+
+
+def test_negative_max_predict_frames_raises():
+    with pytest.raises(ValueError):
+        PassThrough(max_predict_frames=-1)
+
+
+def test_zero_max_predict_frames_does_not_raise():
+    f = PassThrough(max_predict_frames=0)
+    assert f.max_predict_frames == 0
