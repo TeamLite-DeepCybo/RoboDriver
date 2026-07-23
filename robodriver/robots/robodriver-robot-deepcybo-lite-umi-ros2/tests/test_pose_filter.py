@@ -453,3 +453,67 @@ def test_one_euro_orientation_convention_holds_under_compound_rotation():
         out = f.update(t, [0.0, 0.0, 0.0], target.as_quat(), True)
         err = (Rotation.from_quat(out.quat) * target.inv()).magnitude()
         assert np.degrees(err) < 0.1
+
+
+from robodriver_robot_deepcybo_lite_umi_ros2.pose_filter import EkfPoseFilter
+
+
+def test_ekf_tracks_noiseless_ramp():
+    f = EkfPoseFilter()
+    got = _ramp(f, n=90)
+    truth = np.array([0.3 * (k / 30.0) for k in range(90)])
+    assert np.abs(got[40:, 0] - truth[40:]).max() < 5e-3
+
+
+def test_ekf_reduces_jitter():
+    noise = 0.004
+    raw = _ramp(EkfPoseFilter(sigma_meas=1e-6), n=120, noise=noise)
+    filt = _ramp(EkfPoseFilter(sigma_meas=0.004, sigma_accel=0.5),
+                 n=120, noise=noise)
+
+    def hf(a):
+        return np.mean([np.linalg.norm(a[i] - a[i - 2:i + 3].mean(0))
+                        for i in range(2, len(a) - 2)])
+
+    assert hf(filt) < 0.5 * hf(raw)
+
+
+def test_ekf_learns_velocity_it_never_measures():
+    f = EkfPoseFilter()
+    _ramp(f, n=90, v=0.3)
+    # velocity is inferred from the position sequence alone
+    assert f.velocity[0] == pytest.approx(0.3, rel=0.15)
+
+
+def test_ekf_output_quaternion_is_unit_norm():
+    f = EkfPoseFilter()
+    for k in range(120):
+        q = Rotation.from_euler("z", 2.0 * k, degrees=True).as_quat()
+        out = f.update(k / 30.0, [0.0, 0.0, 0.0], q, True)
+    assert np.linalg.norm(out.quat) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_ekf_rotation_converges_short_arc():
+    f = EkfPoseFilter()
+    target = Rotation.from_euler("z", 40, degrees=True)
+    for k in range(200):
+        out = f.update(k / 30.0, [0.0, 0.0, 0.0], target.as_quat(), True)
+    err = (Rotation.from_quat(out.quat) * target.inv()).magnitude()
+    assert np.degrees(err) < 1.0
+
+
+def test_ekf_step_response_settles():
+    f = EkfPoseFilter()
+    for k in range(20):
+        f.update(k / 30.0, [0.0, 0.0, 0.0], IDENT, True)
+    xs = [f.update((20 + k) / 30.0, [1.0, 0.0, 0.0], IDENT, True).pos[0]
+          for k in range(90)]
+    assert xs[-1] == pytest.approx(1.0, abs=2e-2)
+
+
+def test_ekf_rotation_does_not_perturb_position():
+    f = EkfPoseFilter()
+    for k in range(60):
+        q = Rotation.from_euler("x", 3.0 * k, degrees=True).as_quat()
+        out = f.update(k / 30.0, [0.5, -0.25, 0.75], q, True)
+    assert out.pos == pytest.approx([0.5, -0.25, 0.75], abs=1e-3)

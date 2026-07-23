@@ -237,3 +237,91 @@ class OneEuroPoseFilter(BasePoseFilter):
     def _on_predict(self, t):
         dt = max(t - self._t, 0.0)
         return self._p + self._v * dt, self._R.as_quat()
+
+
+class _CVChannel:
+    """Scalar constant-velocity Kalman filter. State [value, rate]."""
+
+    def __init__(self, sigma_meas: float, sigma_accel: float):
+        self.r = float(sigma_meas) ** 2
+        self.sa2 = float(sigma_accel) ** 2
+        self.x = np.zeros(2)
+        self.P = np.eye(2)
+
+    def reset(self, x0: float) -> None:
+        self.x = np.array([float(x0), 0.0])
+        self.P = np.diag([self.r, 1.0])
+
+    def predict(self, dt: float) -> float:
+        F = np.array([[1.0, dt], [0.0, 1.0]])
+        Q = self.sa2 * np.array([[dt ** 4 / 4.0, dt ** 3 / 2.0],
+                                 [dt ** 3 / 2.0, dt ** 2]])
+        self.x = F @ self.x
+        self.P = F @ self.P @ F.T + Q
+        return self.x[0]
+
+    def update(self, z: float, dt: float) -> float:
+        self.predict(dt)
+        H = np.array([[1.0, 0.0]])
+        S = float(H @ self.P @ H.T) + self.r
+        K = (self.P @ H.T / S).ravel()
+        y = float(z) - self.x[0]
+        self.x = self.x + K * y
+        self.P = (np.eye(2) - np.outer(K, H)) @ self.P
+        return self.x[0]
+
+
+class EkfPoseFilter(BasePoseFilter):
+    """Constant-velocity KF per position axis and per orientation tangent axis.
+
+    A plain KF on the tangent space rather than a full 6-DoF error-state EKF:
+    the tangent-space formulation already keeps orientation on the manifold,
+    and the extra machinery would not change the jitter/lag trade this filter
+    is judged on.
+    """
+
+    def __init__(self, sigma_meas: float = 0.004, sigma_accel: float = 1.0,
+                 sigma_meas_rot: float = 0.02, sigma_alpha: float = 5.0,
+                 max_predict_frames: int = 3):
+        self._sm, self._sa = sigma_meas, sigma_accel
+        self._smr, self._salpha = sigma_meas_rot, sigma_alpha
+        super().__init__(max_predict_frames=max_predict_frames)
+
+    def reset(self) -> None:
+        super().reset()
+        self._pos = [_CVChannel(self._sm, self._sa) for _ in range(3)]
+        self._rot = [_CVChannel(self._smr, self._salpha) for _ in range(3)]
+        self._t = None
+        self._R = None
+
+    @property
+    def velocity(self) -> np.ndarray:
+        """Inferred linear velocity — never measured directly."""
+        return np.array([c.x[1] for c in self._pos])
+
+    def _on_first(self, t, pos, quat):
+        self._t = t
+        for c, v in zip(self._pos, np.asarray(pos, dtype=float)):
+            c.reset(v)
+        for c in self._rot:
+            c.reset(0.0)
+        self._R = Rotation.from_quat(np.asarray(quat, dtype=float))
+
+    def _on_measurement(self, t, pos, quat):
+        dt = max(t - self._t, 1e-6)
+        self._t = t
+        p = np.array([c.update(z, dt)
+                      for c, z in zip(self._pos, np.asarray(pos, float))])
+
+        R_meas = Rotation.from_quat(np.asarray(quat, dtype=float))
+        delta = (R_meas * self._R.inv()).as_rotvec()
+        d = np.array([c.update(z, dt) for c, z in zip(self._rot, delta)])
+        self._R = Rotation.from_rotvec(d) * self._R
+        for c in self._rot:            # the delta is consumed; re-centre
+            c.x[0] = 0.0
+        return p, self._R.as_quat()
+
+    def _on_predict(self, t):
+        dt = max(t - self._t, 0.0)
+        p = np.array([c.x[0] + c.x[1] * dt for c in self._pos])
+        return p, self._R.as_quat()
