@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 
 @dataclass(frozen=True)
@@ -153,9 +154,6 @@ class BasePoseFilter(ABC):
         return self._emit(out_p, out_q, False, self._n_predicted)
 
 
-from scipy.spatial.transform import Rotation
-
-
 def _alpha(cutoff: float, dt: float) -> float:
     tau = 1.0 / (2.0 * np.pi * cutoff)
     return 1.0 / (1.0 + tau / dt)
@@ -227,6 +225,10 @@ class OneEuroPoseFilter(BasePoseFilter):
         self._p, self._t = p_new, t
 
         R_meas = Rotation.from_quat(np.asarray(quat, dtype=float))
+        # `as_rotvec()` returns an angle in [0, pi], so a per-frame rotation
+        # exceeding 180 degrees would wrap discontinuously here (branch cut).
+        # Unreachable at teleop speeds: >90 deg/frame at 30 fps is >2700 deg/s,
+        # far beyond any human hand or the tracker's own measurement range.
         delta = (R_meas * self._R.inv()).as_rotvec()
         delta_f = self._rot_f.update(delta, dt)
         self._R = Rotation.from_rotvec(delta_f) * self._R

@@ -369,3 +369,87 @@ def test_one_euro_position_does_not_perturb_orientation():
         out = f.update(k / 30.0, [0.05 * k, 0.0, 0.0], IDENT, True)
     err = (Rotation.from_quat(out.quat) * Rotation.identity().inv()).magnitude()
     assert np.degrees(err) < 1e-6
+
+
+def test_one_euro_beta_reduces_lag_at_speed():
+    """`beta` is the speed-adaptation term that makes this a 1-euro filter
+    rather than a plain fixed-cutoff low-pass. Regression guard: if the
+    adaptive cutoff were silently dropped (e.g. `cutoff = self.min_cutoff`
+    instead of `self.min_cutoff + self.beta * |dx_hat|`), `beta` would have
+    NO effect and a larger `beta` would not reduce lag -- this would then
+    pass with `beta=0` on both sides, exactly the gap the reviewer found in
+    the existing offset/jitter tests.
+    """
+    v, fps, min_cutoff = 0.5, 30.0, 1.0
+    f_lo = OneEuroPoseFilter(min_cutoff=min_cutoff, beta=0.0)
+    f_hi = OneEuroPoseFilter(min_cutoff=min_cutoff, beta=2.0)
+    got_lo = _ramp(f_lo, n=120, fps=fps, v=v)
+    got_hi = _ramp(f_hi, n=120, fps=fps, v=v)
+    truth = np.array([v * (k / fps) for k in range(120)])
+
+    offset_lo = (truth[60:] - got_lo[60:, 0]).mean()
+    offset_hi = (truth[60:] - got_hi[60:, 0]).mean()
+
+    # both still lag (a low-pass never leads a ramp)
+    assert offset_lo > 0
+    assert offset_hi > 0
+    # the larger-beta filter has a higher effective cutoff at this speed and
+    # therefore materially less lag
+    assert offset_hi < 0.5 * offset_lo
+
+
+def test_one_euro_adaptation_is_speed_dependent():
+    """The actual claim of a 1-euro filter: the cutoff itself rises with
+    speed, so lag grows SUB-linearly with speed -- offset/speed must shrink
+    as speed increases. A fixed-cutoff low-pass (or `beta` silently dropped)
+    would instead give offset exactly proportional to speed, so
+    offset/speed would be constant across speeds.
+    """
+    fps, min_cutoff, beta = 30.0, 1.0, 2.0
+    v_slow, v_fast = 0.1, 1.0
+
+    f_slow = OneEuroPoseFilter(min_cutoff=min_cutoff, beta=beta)
+    f_fast = OneEuroPoseFilter(min_cutoff=min_cutoff, beta=beta)
+    got_slow = _ramp(f_slow, n=120, fps=fps, v=v_slow)
+    got_fast = _ramp(f_fast, n=120, fps=fps, v=v_fast)
+    truth_slow = np.array([v_slow * (k / fps) for k in range(120)])
+    truth_fast = np.array([v_fast * (k / fps) for k in range(120)])
+
+    offset_slow = (truth_slow[60:] - got_slow[60:, 0]).mean()
+    offset_fast = (truth_fast[60:] - got_fast[60:, 0]).mean()
+
+    ratio_slow = offset_slow / v_slow
+    ratio_fast = offset_fast / v_fast
+
+    # not merely linear scaling with speed the way a fixed cutoff would be
+    assert ratio_fast < 0.6 * ratio_slow
+
+
+def test_one_euro_orientation_convention_holds_under_compound_rotation():
+    """Every other rotation test here rotates about a SINGLE fixed axis, where
+    `from_rotvec(delta_f) * R_prev` and the swapped convention
+    `R_prev * from_rotvec(delta_f)` (with delta computed as
+    `R_prev.inv() * R_meas` instead of `R_meas * R_prev.inv()`) are
+    mathematically indistinguishable, because single-axis rotations commute.
+    A genuine composition-convention bug would therefore go undetected by
+    every test above this one.
+
+    This drives a COMPOUND, multi-axis, continuously-changing rotation
+    (simultaneous z and x, both advancing every frame) with `min_cutoff` so
+    high that alpha is effectively 1, so the filter should reproduce its
+    input almost exactly. With the CORRECT convention it does, since
+    `from_rotvec(delta) * R_prev` reconstructs `R_meas` exactly regardless of
+    axis. With an inconsistent composition/delta convention it does not,
+    because compound rotations do not commute -- the error blows up to tens
+    of degrees instead of staying near zero.
+    """
+    f = OneEuroPoseFilter(min_cutoff=1e6, beta=0.0)
+    fps = 30.0
+    for k in range(120):
+        t = k / fps
+        Rz = Rotation.from_euler("z", 3.0 * k, degrees=True)
+        Rx = Rotation.from_euler("x", 2.0 * k, degrees=True)
+        target = Rz * Rx
+        out = f.update(t, [0.0, 0.0, 0.0], target.as_quat(), True)
+        err = (Rotation.from_quat(out.quat) * target.inv()).magnitude()
+        assert np.degrees(err) < 0.1
