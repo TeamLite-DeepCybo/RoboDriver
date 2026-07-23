@@ -407,13 +407,33 @@ def _ramp(f, n=60, fps=30.0, v=0.3, noise=0.0, seed=0):
     return np.array(out)
 
 
-def test_one_euro_tracks_noiseless_ramp_without_lag():
+def test_one_euro_tracks_ramp_slope_with_bounded_offset():
+    """A low-pass CANNOT track a ramp without positional offset -- it trails by
+    roughly v*tau by construction (~43 mm at 0.3 m/s with the default cutoff).
+    Demanding near-zero offset would be demanding that it not filter.
+
+    What must hold is that it tracks the SLOPE: in steady state the output
+    velocity equals the input velocity, and the offset is constant rather than
+    growing. That is what catches sign errors and broken state updates, which
+    is what this test is for.
+
+    (The EKF's equivalent test DOES assert near-zero lag, because a
+    constant-velocity model has a velocity state and tracks a ramp losslessly.
+    The difference is real and shows up in the benchmark.)
+    """
+    v, fps = 0.3, 30.0
     f = OneEuroPoseFilter()
-    got = _ramp(f, n=90)
-    truth = np.array([0.3 * (k / 30.0) for k in range(90)])
-    # after settling, a noise-free constant-velocity signal must be tracked
-    # closely: adaptive cutoff opens up when motion is steady
-    assert np.abs(got[40:, 0] - truth[40:]).max() < 5e-3
+    got = _ramp(f, n=120, fps=fps, v=v)
+    truth = np.array([v * (k / fps) for k in range(120)])
+
+    # slope tracked exactly in steady state
+    out_v = np.diff(got[60:, 0]) * fps
+    assert np.allclose(out_v, v, atol=1e-3)
+
+    # offset is constant (not growing) and of the expected magnitude
+    offset = truth[60:] - got[60:, 0]
+    assert offset.std() < 1e-4, "offset must be constant, not drifting"
+    assert 0.005 < offset.mean() < 0.10
 
 
 def test_one_euro_reduces_jitter():
