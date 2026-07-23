@@ -263,7 +263,7 @@ class _CVChannel:
     def update(self, z: float, dt: float) -> float:
         self.predict(dt)
         H = np.array([[1.0, 0.0]])
-        S = float(H @ self.P @ H.T) + self.r
+        S = (H @ self.P @ H.T).item() + self.r
         K = (self.P @ H.T / S).ravel()
         y = float(z) - self.x[0]
         self.x = self.x + K * y
@@ -314,6 +314,10 @@ class EkfPoseFilter(BasePoseFilter):
                       for c, z in zip(self._pos, np.asarray(pos, float))])
 
         R_meas = Rotation.from_quat(np.asarray(quat, dtype=float))
+        # `as_rotvec()` returns an angle in [0, pi], so a per-frame rotation
+        # exceeding 180 degrees would wrap discontinuously here (branch cut).
+        # Unreachable at teleop speeds: >90 deg/frame at 30 fps is >2700 deg/s,
+        # far beyond any human hand or the tracker's own measurement range.
         delta = (R_meas * self._R.inv()).as_rotvec()
         d = np.array([c.update(z, dt) for c, z in zip(self._rot, delta)])
         self._R = Rotation.from_rotvec(d) * self._R

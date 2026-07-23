@@ -517,3 +517,33 @@ def test_ekf_rotation_does_not_perturb_position():
         q = Rotation.from_euler("x", 3.0 * k, degrees=True).as_quat()
         out = f.update(k / 30.0, [0.5, -0.25, 0.75], q, True)
     assert out.pos == pytest.approx([0.5, -0.25, 0.75], abs=1e-3)
+
+
+def test_ekf_orientation_convention_holds_under_compound_rotation():
+    """Every EKF rotation test above this one rotates about a SINGLE fixed
+    axis ("z" or "x"), where `from_rotvec(d) * R_prev` and the swapped
+    convention `R_prev * from_rotvec(d)` are mathematically indistinguishable,
+    because single-axis rotations commute. A genuine composition-convention
+    bug would therefore go undetected by every test above.
+
+    This drives a COMPOUND, multi-axis, continuously-changing rotation
+    (simultaneous z and x, both advancing every frame) with `sigma_meas_rot`
+    tiny and `sigma_alpha` huge -- the measurement is made extremely
+    trustworthy relative to the process noise, so the Kalman gain on the
+    rotation channels approaches 1 and the filter should reproduce its input
+    almost exactly. With the CORRECT convention it does, since
+    `from_rotvec(d) * R_prev` reconstructs `R_meas` exactly regardless of
+    axis. With an inconsistent composition/delta convention it does not,
+    because compound rotations do not commute -- the error blows up to tens
+    of degrees instead of staying near zero.
+    """
+    f = EkfPoseFilter(sigma_meas_rot=1e-6, sigma_alpha=1e6)
+    fps = 30.0
+    for k in range(120):
+        t = k / fps
+        Rz = Rotation.from_euler("z", 3.0 * k, degrees=True)
+        Rx = Rotation.from_euler("x", 2.0 * k, degrees=True)
+        target = Rz * Rx
+        out = f.update(t, [0.0, 0.0, 0.0], target.as_quat(), True)
+        err = (Rotation.from_quat(out.quat) * target.inv()).magnitude()
+        assert np.degrees(err) < 0.1
