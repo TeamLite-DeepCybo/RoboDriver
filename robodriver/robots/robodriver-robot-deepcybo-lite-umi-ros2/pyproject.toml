@@ -32,6 +32,7 @@ umi-smooth-episodes = "robodriver_robot_deepcybo_lite_umi_ros2.smooth_episodes:m
 umi-qc-episode = "robodriver_robot_deepcybo_lite_umi_ros2.qc_episode:main"
 umi-placement-cells = "robodriver_robot_deepcybo_lite_umi_ros2.placement_cells:main"
 umi-filter-bench = "robodriver_robot_deepcybo_lite_umi_ros2.filter_bench:main"
+umi-filter-node = "robodriver_robot_deepcybo_lite_umi_ros2.filter_node:main"
 
 [tool.setuptools.packages.find]
 include = ["robodriver_robot_deepcybo_lite_umi_ros2"]

@@ -82,6 +82,22 @@ umi-smooth-episodes --root <dataset> --dry-run                   # report only
 
 Design: `docs/superpowers/specs/2026-07-20-umi-offline-smoother-design.md`.
 
+## Teleop pose filter (live)
+
+The tracker publishes RAW poses; this node republishes a smoothed copy for
+teleop. Recorded datasets are unaffected.
+
+    umi-filter-bench --root <dataset> --arm right   # compare filters offline
+    umi-filter-node --filter one-euro               # live, on the rig
+
+Publishes `/umi/filtered/eef_{left,right}` (PoseStamped) and
+`/umi/filtered/stale_{left,right}` (Bool).
+
+> **`stale` means the arm must be halted.** The filter predicts through gaps of
+> at most `--max-predict-frames` (default 3) and then freezes, because
+> extrapolating further measured ~2x worse than freezing when the operator
+> reversed direction during an occlusion.
+
 ## Collection QC (at-the-rig)
 
 The loop while collecting: record an episode, then immediately run
