@@ -10,6 +10,7 @@ from lerobot.teleoperators import TeleoperatorConfig
 
 from robodriver.core.coordinator import Coordinator
 from robodriver.core.monitor import Monitor
+from robodriver.core.ros2_collection_metadata import uses_ros2_collection_bridge
 from robodriver.core.simulator import SimulatorConfig
 from robodriver.core.simulator import Simulator
 
@@ -70,7 +71,7 @@ async def async_main(cfg: ControlPipelineConfig):
     try:
         await coordinator.start()
     except Exception as e:
-        if cfg.robot.type != "deepcybo-lite-aio-ros2":
+        if not uses_ros2_collection_bridge(cfg.robot.type):
             raise
         logger.warning(
             f"RoboDriver-Server unavailable, continuing Lite ROS2 collection offline: {e}"
@@ -83,7 +84,7 @@ async def async_main(cfg: ControlPipelineConfig):
 
     if "ros2" in cfg.robot.type:
         ros2_manager.add_node(daemon.robot.get_node())
-        if cfg.robot.type == "deepcybo-lite-aio-ros2":
+        if uses_ros2_collection_bridge(cfg.robot.type):
             from robodriver.core.ros2_collection_bridge import Ros2CollectionBridge
 
             collection_bridge = Ros2CollectionBridge(

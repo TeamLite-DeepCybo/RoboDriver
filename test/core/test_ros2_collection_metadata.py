@@ -8,7 +8,20 @@ from robodriver.core.ros2_collection_metadata import (
     ensure_unique_ros2_record_dir,
     get_lite_record_ready_timeout,
     resolve_lite_collection_root,
+    uses_ros2_collection_bridge,
 )
+
+
+def test_umi_robot_type_uses_ros2_collection_bridge():
+    assert uses_ros2_collection_bridge("deepcybo-lite-umi-ros2")
+
+
+def test_aio_robot_type_uses_ros2_collection_bridge():
+    assert uses_ros2_collection_bridge("deepcybo-lite-aio-ros2")
+
+
+def test_unknown_robot_type_does_not_use_ros2_collection_bridge():
+    assert not uses_ros2_collection_bridge("so101")
 
 
 def test_build_lite_ros2_record_cmd_defaults():

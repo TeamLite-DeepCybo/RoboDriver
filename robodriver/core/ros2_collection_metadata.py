@@ -10,6 +10,22 @@ DEFAULT_LITE_COLLECTOR_ID = "ros2_fsm"
 DEFAULT_LITE_MACHINE_ID = "deepcybo-lite-aio-ros2"
 DEFAULT_RECORD_READY_TIMEOUT = 15.0
 
+# Robot types that drive data collection through the ROS2 FSM collection bridge
+# (``/to_robodriver/start_collect`` etc.). These robots mount
+# ``Ros2CollectionBridge`` in ``robodriver.scripts.run`` and keep collecting
+# offline when RoboDriver-Server is unavailable.
+ROS2_COLLECTION_ROBOT_TYPES = frozenset(
+    {
+        "deepcybo-lite-aio-ros2",
+        "deepcybo-lite-umi-ros2",
+    }
+)
+
+
+def uses_ros2_collection_bridge(robot_type: str) -> bool:
+    """Whether ``robot_type`` records via the ROS2 FSM collection bridge."""
+    return robot_type in ROS2_COLLECTION_ROBOT_TYPES
+
 
 def _env_value(env: Mapping[str, str], name: str, default: str) -> str:
     value = env.get(name)
