@@ -10,6 +10,14 @@ occlusion during which the operator reversed direction produced 17.8 cm of
 error in simulation, roughly 2x worse than simply freezing. The gap policy
 below therefore predicts at most `max_predict_frames` and then hard-freezes,
 making that regime unreachable.
+
+That frame-count cap alone is not enough: the reversal error is `2*v*n/fps`,
+which grows without bound as hand speed rises (measured: 2.1 cm vs freezing's
+1.2 cm at the rig's 0.124 m/s median, but 16.7 cm vs freezing's 10.0 cm at
+1.0 m/s -- still reporting `stale=False`). `max_predict_displacement_m` caps
+the predicted DISPLACEMENT itself, so the worst-case reversal error is
+bounded at roughly 2x the cap regardless of speed -- see `BasePoseFilter` for
+the full rationale.
 """
 from __future__ import annotations
 
@@ -19,6 +27,17 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 from scipy.spatial.transform import Rotation
+
+#: Predict through at most this many consecutive untracked frames before
+#: hard-freezing. Defined once here and referenced everywhere else (both
+#: filter subclasses, the node's CLI default, and the README) so the
+#: safety-critical default is never repeated out of sync with itself.
+DEFAULT_MAX_PREDICT_FRAMES = 3
+
+#: Freeze instead of predicting once a predicted pose would travel more than
+#: this far (in metres) from the pose that would otherwise be frozen. See
+#: `BasePoseFilter` for the rationale.
+DEFAULT_MAX_PREDICT_DISPLACEMENT_M = 0.015
 
 
 @dataclass(frozen=True)
@@ -47,14 +66,37 @@ class BasePoseFilter(ABC):
     Subclasses supply only their smoothing maths via the three hooks. Keeping
     the policy here means both filters are governed by ONE implementation of
     the safety-critical behaviour.
+
+    `max_predict_displacement_m` caps how far a predicted pose may travel
+    from the pose that would otherwise be frozen (the last emitted pose from
+    BEFORE the current gap began). Freezing's worst-case error equals how far
+    the hand travelled during the gap; prediction's error is that PLUS
+    however far the filter predicted -- so capping the predicted displacement
+    at D bounds prediction's worst-case reversal error at roughly 2*D
+    REGARDLESS OF SPEED, instead of the uncapped `2*v*n/fps` ceiling, which
+    grows without bound as hand speed rises. At the rig's median speed
+    (~0.124 m/s), `max_predict_frames` (3) frames of prediction cover only
+    ~12.4 mm -- under the 15 mm default cap -- so the anti-stutter benefit for
+    common single-frame dropouts is preserved; at 1.0 m/s the cap engages
+    almost immediately, bounding the error near 3 cm instead of ~20 cm.
     """
 
-    def __init__(self, max_predict_frames: int = 3):
+    def __init__(self, max_predict_frames: int = DEFAULT_MAX_PREDICT_FRAMES,
+                 max_predict_displacement_m: float =
+                 DEFAULT_MAX_PREDICT_DISPLACEMENT_M):
         if max_predict_frames < 0:
             raise ValueError(
                 f"max_predict_frames must be >= 0, got {max_predict_frames}"
             )
+        if max_predict_displacement_m < 0:
+            raise ValueError(
+                "max_predict_displacement_m must be >= 0, got "
+                f"{max_predict_displacement_m}"
+            )
         self.max_predict_frames = int(max_predict_frames)
+        # 0.0 is valid and means "never predict": every untracked frame
+        # freezes immediately, same as max_predict_frames=0.
+        self.max_predict_displacement_m = float(max_predict_displacement_m)
         self.reset()
 
     # -- lifecycle ---------------------------------------------------------
@@ -63,6 +105,12 @@ class BasePoseFilter(ABC):
         self._n_predicted = 0
         self._frozen: tuple[np.ndarray, np.ndarray] | None = None
         self._last: tuple[np.ndarray, np.ndarray] | None = None
+        # The pose that would be frozen right now, captured at the moment
+        # the CURRENT gap began -- i.e. before any predicted output for this
+        # gap was emitted. Fixed for the duration of one gap so the
+        # displacement cap bounds CUMULATIVE predicted travel, not the
+        # frame-to-frame delta.
+        self._gap_anchor: tuple[np.ndarray, np.ndarray] | None = None
 
     def _emit(self, pos: np.ndarray, quat: np.ndarray, stale: bool,
               n_predicted: int) -> FilterOutput:
@@ -121,37 +169,65 @@ class BasePoseFilter(ABC):
 
     # -- the policy --------------------------------------------------------
     def update(self, t: float, pos, quat, tracked: bool) -> FilterOutput:
-        if tracked:
-            p = np.asarray(pos, dtype=float)
-            q = np.asarray(quat, dtype=float)
+        in_p = np.asarray(pos, dtype=float)
+        in_q = np.asarray(quat, dtype=float)
+        # A NaN/inf in a "tracked" measurement must never enter the filter
+        # state: every filter here is linear, so one non-finite value would
+        # poison every subsequent output forever, with `stale` staying False
+        # and no reset path from the node. Route it through the exact same
+        # gap/predict/freeze policy as a genuinely untracked frame instead --
+        # it can then never be fused by `_on_first`/`_on_measurement`.
+        usable = tracked and bool(
+            np.all(np.isfinite(in_p)) and np.all(np.isfinite(in_q)))
+
+        if usable:
             if not self._initialized:
                 # Verbatim adoption: a warm-up ramp would command the arm to
                 # drift from an arbitrary origin toward the true pose.
-                self._on_first(t, p, q)
+                self._on_first(t, in_p, in_q)
                 self._initialized = True
                 self._n_predicted = 0
                 self._frozen = None
-                return self._emit(p, q, False, 0)
-            out_p, out_q = self._on_measurement(t, p, q)
+                self._gap_anchor = None
+                return self._emit(in_p, in_q, False, 0)
+            out_p, out_q = self._on_measurement(t, in_p, in_q)
             self._n_predicted = 0
             self._frozen = None
+            self._gap_anchor = None
             return self._emit(out_p, out_q, False, 0)
 
         if not self._initialized:
             return FilterOutput(None, None, True, 0)
 
+        if self._n_predicted == 0:
+            # Entering a new gap: anchor the displacement cap on the pose
+            # that would be frozen right now (see `_gap_anchor` above).
+            self._gap_anchor = self._last
         self._n_predicted += 1
-        if self._n_predicted > self.max_predict_frames:
+
+        over_frame_budget = self._n_predicted > self.max_predict_frames
+        if over_frame_budget or self.max_predict_displacement_m <= 0.0:
+            # `max_predict_displacement_m == 0` means "never predict":
+            # freeze immediately without ever calling `_on_predict`, exactly
+            # like an immediate frame-budget breach.
+            exceeded = True
+        else:
+            cand_p, cand_q = self._on_predict(t)
+            anchor_p, _ = self._gap_anchor
+            displacement = float(
+                np.linalg.norm(np.asarray(cand_p, dtype=float) - anchor_p))
+            exceeded = displacement > self.max_predict_displacement_m
+
+        if exceeded:
             if self._frozen is None:
-                # Freeze on the LAST value emitted while still within budget,
-                # then repeat it bit-identically: the arm holds still instead
-                # of creeping.
+                # Freeze on the LAST value emitted while still within
+                # budget, then repeat it bit-identically: the arm holds
+                # still instead of creeping.
                 self._frozen = self._last
             p, q = self._frozen
             return self._pack(p, q, True, self._n_predicted)
 
-        out_p, out_q = self._on_predict(t)
-        return self._emit(out_p, out_q, False, self._n_predicted)
+        return self._emit(cand_p, cand_q, False, self._n_predicted)
 
 
 def _alpha(cutoff: float, dt: float) -> float:
@@ -194,12 +270,23 @@ class OneEuroPoseFilter(BasePoseFilter):
     Orientation is filtered as the rotation VECTOR of the delta from the last
     filtered orientation, which stays on the manifold by construction — no
     renormalisation and no hemisphere handling.
+
+    `beta=1.0` was selected by `filter_bench`'s own parameter sweep: at
+    `min_cutoff=1.0`, `beta=1.0` gives the same 0.44 mm jitter as
+    `beta=0.4` (the prior default) but at 79 ms of lag instead of 106 ms, at
+    equal (0 %) overshoot -- strictly better on every axis the benchmark
+    measures, so shipping `beta=0.4` was leaving a free improvement on the
+    table.
     """
 
-    def __init__(self, min_cutoff: float = 1.0, beta: float = 0.4,
-                 d_cutoff: float = 1.0, max_predict_frames: int = 3):
+    def __init__(self, min_cutoff: float = 1.0, beta: float = 1.0,
+                 d_cutoff: float = 1.0,
+                 max_predict_frames: int = DEFAULT_MAX_PREDICT_FRAMES,
+                 max_predict_displacement_m: float =
+                 DEFAULT_MAX_PREDICT_DISPLACEMENT_M):
         self._mc, self._beta, self._dc = min_cutoff, beta, d_cutoff
-        super().__init__(max_predict_frames=max_predict_frames)
+        super().__init__(max_predict_frames=max_predict_frames,
+                          max_predict_displacement_m=max_predict_displacement_m)
 
     def reset(self) -> None:
         super().reset()
@@ -282,10 +369,13 @@ class EkfPoseFilter(BasePoseFilter):
 
     def __init__(self, sigma_meas: float = 0.004, sigma_accel: float = 1.0,
                  sigma_meas_rot: float = 0.02, sigma_alpha: float = 5.0,
-                 max_predict_frames: int = 3):
+                 max_predict_frames: int = DEFAULT_MAX_PREDICT_FRAMES,
+                 max_predict_displacement_m: float =
+                 DEFAULT_MAX_PREDICT_DISPLACEMENT_M):
         self._sm, self._sa = sigma_meas, sigma_accel
         self._smr, self._salpha = sigma_meas_rot, sigma_alpha
-        super().__init__(max_predict_frames=max_predict_frames)
+        super().__init__(max_predict_frames=max_predict_frames,
+                          max_predict_displacement_m=max_predict_displacement_m)
 
     def reset(self) -> None:
         super().reset()

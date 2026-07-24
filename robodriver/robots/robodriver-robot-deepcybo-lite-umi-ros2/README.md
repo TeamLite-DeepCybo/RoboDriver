@@ -90,13 +90,33 @@ teleop. Recorded datasets are unaffected.
     umi-filter-bench --root <dataset> --arm right   # compare filters offline
     umi-filter-node --filter one-euro               # live, on the rig
 
+    # tune the parameters the benchmark exists to tune, without a code edit:
+    umi-filter-node --filter one-euro --min-cutoff 1.0 --beta 1.0 \
+        --max-predict-frames 3 --max-predict-displacement-m 0.015 \
+        --silence-timeout-s 0.2
+
 Publishes `/umi/filtered/eef_{left,right}` (PoseStamped) and
 `/umi/filtered/stale_{left,right}` (Bool).
 
-> **`stale` means the arm must be halted.** The filter predicts through gaps of
-> at most `--max-predict-frames` (default 3) and then freezes, because
-> extrapolating further measured ~2x worse than freezing when the operator
-> reversed direction during an occlusion.
+> **`stale` means the arm must be halted, and no pose is published for it.**
+> While an arm is stale (frozen, or its topic has gone silent), the node
+> publishes ONLY the `Bool` on `/umi/filtered/stale_{left,right}` -- never a
+> `PoseStamped` under a fresh timestamp. A consumer that never receives a
+> pose cannot mistakenly act on a stale one.
+>
+> The filter predicts through gaps of at most `--max-predict-frames`
+> (default: see `DEFAULT_MAX_PREDICT_FRAMES` in `pose_filter.py`) frames, and
+> caps the predicted DISPLACEMENT at `--max-predict-displacement-m` (default:
+> see `DEFAULT_MAX_PREDICT_DISPLACEMENT_M`) so that predicting is never worse
+> than freezing regardless of hand speed -- extrapolating further measured
+> ~2x worse than freezing when the operator reversed direction during an
+> occlusion, and that ratio only grows with speed if the displacement isn't
+> also capped.
+>
+> Independently of the filter's own gap policy, a wall-clock watchdog
+> (`--silence-timeout-s`, default 0.2 s) declares an arm stale if its topic
+> goes fully silent (dead tracker, dropped camera, crashed node) -- not just
+> when messages keep arriving untracked.
 
 ## Collection QC (at-the-rig)
 

@@ -119,3 +119,120 @@ def test_frozen_pose_never_drifts(cls):
     frozen = [o.pos for o in outs if o.stale]
     for p in frozen[1:]:
         assert (p == frozen[0]).all()
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: the frame-count budget alone lets the reversal error (2*v*n/fps)
+# grow without bound as hand speed rises. `max_predict_displacement_m` caps
+# the predicted DISPLACEMENT itself so the worst case stays near 2x the cap
+# regardless of speed. Parametrized over both filters, same as the rest of
+# this file.
+# ---------------------------------------------------------------------------
+CAP_M = 0.015
+
+
+def _reversal_run(f, v, n_gap=30):
+    """Forward for 15 tracked frames, then occlude AND reverse for `n_gap`
+    frames. Returns the list of FilterOutput from the occluded portion.
+    """
+    truth, k = 0.0, 0
+    for _ in range(15):
+        f.update(k / FPS, [truth, 0.0, 0.0], IDENT, True)
+        truth += v / FPS
+        k += 1
+    outs = []
+    for _ in range(n_gap):
+        out = f.update(k / FPS, [0.0, 0.0, 0.0], IDENT, False)
+        truth -= v / FPS
+        outs.append((out, truth))
+        k += 1
+    return outs
+
+
+@pytest.mark.parametrize("cls", FILTERS)
+def test_displacement_cap_bounds_error_at_high_speed(cls):
+    """At v = 1.0 m/s the UNCAPPED ceiling (2*v*max_predict_frames/fps) is
+    ~20 cm and grows further with speed. With the cap active, the
+    predicted-frame error (measured, like `test_reversal_during_occlusion_
+    commands_no_motion`, only while `stale` is False -- once frozen the
+    divergence is hand travel, not filter error, and is unbounded by design)
+    must stay near 2x the 15 mm cap instead, and be materially better than
+    the uncapped ceiling.
+    """
+    v = 1.0
+    f = cls(max_predict_displacement_m=CAP_M)
+    outs = _reversal_run(f, v)
+
+    live_err = max((abs(out.pos[0] - truth) for out, truth in outs
+                    if not out.stale), default=0.0)
+
+    uncapped_ceiling = 2.0 * v * f.max_predict_frames / FPS
+    assert live_err <= 2.0 * CAP_M * 1.5, (
+        f"{cls.__name__} predicted-frame error {live_err*100:.2f} cm is not "
+        f"bounded near 2x the {CAP_M*100:.1f} cm displacement cap"
+    )
+    assert live_err < 0.5 * uncapped_ceiling, (
+        f"{cls.__name__} capped error {live_err*100:.2f} cm is not "
+        f"materially better than the uncapped 2*v*n/fps ceiling of "
+        f"{uncapped_ceiling*100:.2f} cm"
+    )
+
+
+@pytest.mark.parametrize("cls", FILTERS)
+def test_displacement_cap_engages_before_frame_budget_at_high_speed(cls):
+    """At v = 1.0 m/s, one frame of extrapolation alone (~33 mm) already
+    exceeds the 15 mm cap, so the filter must freeze in FEWER predicted
+    frames than `max_predict_frames` -- the cap, not the frame count, is
+    what stops it.
+    """
+    f = cls(max_predict_displacement_m=CAP_M)
+    outs = _reversal_run(f, v=1.0)
+
+    n_predicted_before_freeze = 0
+    for out, _truth in outs:
+        if out.stale:
+            break
+        n_predicted_before_freeze += 1
+
+    assert n_predicted_before_freeze < f.max_predict_frames, (
+        f"{cls.__name__} predicted {n_predicted_before_freeze} frames "
+        f"before freezing at v=1.0 m/s; expected the displacement cap to "
+        f"engage before the {f.max_predict_frames}-frame budget"
+    )
+
+
+@pytest.mark.parametrize("cls", FILTERS)
+def test_displacement_cap_does_not_engage_at_median_speed(cls):
+    """At the rig's median speed (0.124 m/s), `max_predict_frames` frames of
+    prediction cover ~12.4 mm -- under the 15 mm default cap -- so the
+    anti-stutter behaviour for ordinary single/double-frame dropouts must be
+    unchanged: all `max_predict_frames` predicted frames still happen before
+    freezing.
+    """
+    f = cls()  # default cap
+    outs = _reversal_run(f, v=0.124)
+
+    n_predicted_before_freeze = 0
+    for out, _truth in outs:
+        if out.stale:
+            break
+        n_predicted_before_freeze += 1
+
+    assert n_predicted_before_freeze == f.max_predict_frames, (
+        f"{cls.__name__} predicted only {n_predicted_before_freeze} frames "
+        f"at the rig's median speed; expected all {f.max_predict_frames} "
+        f"(the anti-stutter property regressed)"
+    )
+
+
+@pytest.mark.parametrize("cls", FILTERS)
+def test_zero_displacement_cap_freezes_immediately(cls):
+    """`max_predict_displacement_m=0.0` means "never predict": the very
+    first untracked frame must freeze, same as `max_predict_frames=0`.
+    """
+    f = cls(max_predict_displacement_m=0.0)
+    for k in range(15):
+        f.update(k / FPS, [0.01 * k, 0.0, 0.0], IDENT, True)
+    out = f.update(15 / FPS, [0.0, 0.0, 0.0], IDENT, False)
+    assert out.stale is True
+    assert out.n_predicted == 1

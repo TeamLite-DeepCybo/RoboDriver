@@ -1,9 +1,11 @@
+import math
+
 import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
 from robodriver_robot_deepcybo_lite_umi_ros2.pose_filter import (
-    BasePoseFilter, FilterOutput,
+    BasePoseFilter, DEFAULT_MAX_PREDICT_FRAMES, FilterOutput,
 )
 
 IDENT = np.array([0.0, 0.0, 0.0, 1.0])
@@ -12,8 +14,19 @@ IDENT = np.array([0.0, 0.0, 0.0, 1.0])
 class PassThrough(BasePoseFilter):
     """Minimal concrete filter: no smoothing, constant-velocity predict.
 
-    Exists to test the BASE class policy in isolation from any smoothing maths.
+    Exists to test the BASE class's FRAME-COUNT gap policy in isolation from
+    any smoothing maths -- so the displacement cap (a separate, real-filter
+    safety feature exercised at realistic speeds in `test_filter_safety.py`)
+    defaults to disabled here. Several tests below feed a 0.3 m/s ramp
+    purely to exercise the frame-count policy; at that speed the cap's 15 mm
+    default would otherwise engage within 1-2 predicted frames and change
+    `n_predicted`/`stale` in ways unrelated to what these tests check.
     """
+
+    def __init__(self, max_predict_frames: int = DEFAULT_MAX_PREDICT_FRAMES,
+                 max_predict_displacement_m: float = math.inf):
+        super().__init__(max_predict_frames=max_predict_frames,
+                          max_predict_displacement_m=max_predict_displacement_m)
 
     def _on_first(self, t, pos, quat):
         self._p = np.array(pos, float)
@@ -145,6 +158,43 @@ def test_recovers_after_long_freeze_no_lockout():
     assert out.pos[0] == pytest.approx(5.0, abs=1e-9)
 
 
+def test_nan_measurement_does_not_corrupt_state():
+    """A NaN in a "tracked" measurement must never be fused: every filter
+    here is linear, so a NaN, once fused, would poison every subsequent
+    output forever (NaN is absorbing), with `stale` staying False and no
+    reset path from the node. It must instead be routed through the gap
+    policy exactly as if this frame were untracked.
+    """
+    f = PassThrough()
+    _feed(f, 5)                                    # last real pos = 0.04
+    out = f.update(5 / 30.0, [float("nan"), 0.0, 0.0], IDENT, tracked=True)
+    assert not np.isnan(out.pos).any(), "NaN measurement leaked into output"
+    assert out.stale is False                       # within predict budget
+    # a subsequent good measurement must be tracked normally, not corrupted
+    out2 = f.update(6 / 30.0, [0.05, 0.0, 0.0], IDENT, tracked=True)
+    assert out2.stale is False
+    assert out2.n_predicted == 0
+    assert (out2.pos == np.array([0.05, 0.0, 0.0])).all()
+    assert not np.isnan(out2.pos).any()
+
+
+def test_inf_measurement_handled_same_as_nan():
+    f = PassThrough()
+    _feed(f, 5)
+    out = f.update(5 / 30.0, [float("inf"), 0.0, 0.0], IDENT, tracked=True)
+    assert not np.isinf(out.pos).any(), "inf measurement leaked into output"
+    out2 = f.update(6 / 30.0, [0.05, 0.0, 0.0], IDENT, tracked=True)
+    assert out2.stale is False
+    assert (out2.pos == np.array([0.05, 0.0, 0.0])).all()
+
+
+def test_nan_measurement_before_first_track_stays_uninitialized():
+    f = PassThrough()
+    out = f.update(0.0, [float("nan"), 0.0, 0.0], IDENT, tracked=True)
+    assert out.pos is None and out.stale is True
+    assert not f.initialized
+
+
 def test_reset_returns_to_uninitialized():
     f = PassThrough()
     _feed(f, 5)
@@ -269,6 +319,16 @@ def test_negative_max_predict_frames_raises():
 def test_zero_max_predict_frames_does_not_raise():
     f = PassThrough(max_predict_frames=0)
     assert f.max_predict_frames == 0
+
+
+def test_negative_max_predict_displacement_raises():
+    with pytest.raises(ValueError):
+        PassThrough(max_predict_displacement_m=-0.001)
+
+
+def test_zero_max_predict_displacement_does_not_raise():
+    f = PassThrough(max_predict_displacement_m=0.0)
+    assert f.max_predict_displacement_m == 0.0
 
 
 from robodriver_robot_deepcybo_lite_umi_ros2.pose_filter import OneEuroPoseFilter
