@@ -1,8 +1,11 @@
 import asyncio
 import queue
+import shutil
 import threading
 import time
 from datetime import datetime
+from enum import Enum
+from pathlib import Path
 from typing import Dict, Optional
 
 import aiohttp
@@ -13,6 +16,12 @@ from lerobot.teleoperators import Teleoperator
 
 from robodriver.core.recorder import Record, RecordConfig
 from robodriver.core.replayer import DatasetReplayConfig, ReplayConfig, replay
+from robodriver.core.ros2_collection_metadata import (
+    build_lite_ros2_record_cmd,
+    ensure_unique_ros2_record_dir,
+    get_lite_record_ready_timeout,
+    resolve_lite_collection_root,
+)
 from robodriver.dataset.dorobot_dataset import *
 from robodriver.dataset.visual.visual_dataset import visualize_dataset
 from robodriver.robots.daemon import Daemon
@@ -26,6 +35,15 @@ from robodriver.utils.data_file import check_disk_space, find_epindex_from_datai
 from robodriver.utils.utils import cameras_to_stream_json, get_current_git_branch
 
 logger = logging_mp.get_logger(__name__)
+
+
+class CollectionState(str, Enum):
+    IDLE = "IDLE"
+    COLLECTING = "COLLECTING"
+    WAITING_AFFIRM = "WAITING_AFFIRM"
+    SAVING = "SAVING"
+    DISCARDING = "DISCARDING"
+    ERROR = "ERROR"
 
 
 class Coordinator:
@@ -46,6 +64,7 @@ class Coordinator:
         self.teleop = teleop
 
         self.running = False
+        self.server_available = False
         self.last_heartbeat_time = 0
         self.heartbeat_interval = 2
         self.recording = False
@@ -61,18 +80,36 @@ class Coordinator:
         self.sio.on("robot_command", self.__on_robot_command_handle)
 
         self.record = None
+        self.collection_state = CollectionState.IDLE
+        self.pending_episode_index = None
+        self.pending_save_data = None
+        self.pending_record_cmd = None
+        self.last_collection_state_change_time = time.time()
+        self._last_sync_ok: Optional[bool] = None
+        self._last_sync_detail: Optional[dict] = None
+        self.ros2_collection_sequence = 0
+        self._collection_lock = asyncio.Lock()
 
     ####################### Client Start/Stop ############################
     async def start(self):
         """启动客户端"""
         self.running = True
-        await self.sio.connect(self.server_url)
+        try:
+            await self.sio.connect(self.server_url)
+        except Exception:
+            self.running = False
+            self.server_available = False
+            raise
+        self.server_available = True
         # 用 asyncio 任务发心跳
         asyncio.create_task(self.send_heartbeat_loop())
+        # 非阻塞检查管线配置是否完整（仅打印引导提示）
+        asyncio.create_task(self._check_pipeline_config())
 
     async def stop(self):
         self.running = False
-        await self.sio.disconnect()
+        if self.sio.connected:
+            await self.sio.disconnect()
         await self.session.close()
         logger.info("异步客户端已停止")
 
@@ -83,11 +120,379 @@ class Coordinator:
 
     async def __on_connect_handle(self):
         """连接成功回调"""
+        self.server_available = True
         logger.info("成功连接到服务器")
 
     async def __on_disconnect_handle(self):
         """断开连接回调"""
+        self.server_available = False
         logger.info("与服务器断开连接")
+
+    ####################### ROS2 Collection API ############################
+    def _set_collection_state(self, state: CollectionState):
+        if self.collection_state != state:
+            logger.info(
+                f"Collection state: {self.collection_state.value} -> {state.value}"
+            )
+        self.collection_state = state
+        self.last_collection_state_change_time = time.time()
+
+    def _collection_result(self, msg: str, data: Optional[dict] = None) -> dict:
+        result = {
+            "msg": msg,
+            "state": self.collection_state.value,
+        }
+        if data is not None:
+            result["data"] = data
+        return result
+
+    async def _trigger_pipeline_sync(self, source_path: str, dataset_name: str) -> dict:
+        """Fire-and-forget: trigger RoboDriver-Server pipeline sync after ROS2 collection.
+
+        Returns a result dict with status so the caller can inspect the outcome.
+        Never raises — all errors are captured in the returned dict.
+        """
+        base = {"pipeline_sync": "attempted", "source_path": source_path}
+        if not source_path or not dataset_name:
+            return {**base, "pipeline_sync": "skipped", "reason": "missing path or name"}
+        if not self.server_available:
+            logger.info("Server unavailable, skipping pipeline sync trigger.")
+            return {**base, "pipeline_sync": "skipped", "reason": "server unavailable"}
+
+        sync_url = f"{self.server_url}/api/dataset/sync"
+        payload = {"source_path": source_path, "dataset_name": dataset_name}
+
+        try:
+            async with self.session.post(
+                sync_url,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                body = await resp.json() if resp.status == 200 else await resp.text()
+                if resp.status == 200:
+                    logger.info("Pipeline sync OK: %s", body)
+                    self._last_sync_ok = True
+                    self._last_sync_detail = body
+                    return {**base, "pipeline_sync": "ok", "server_response": body}
+                else:
+                    err_text = body if isinstance(body, str) else body.get("error", str(body))
+                    logger.warning(
+                        "Pipeline sync FAILED (HTTP %s). "
+                        "Server may be misconfigured — "
+                        "run 'curl %s/api/dataset/config_status' for hints. "
+                        "Data is SAFE on local disk.  Error: %s",
+                        resp.status, self.server_url, err_text,
+                    )
+                    self._last_sync_ok = False
+                    self._last_sync_detail = {"http_status": resp.status, "error": err_text}
+                    return {
+                        **base,
+                        "pipeline_sync": "failed",
+                        "http_status": resp.status,
+                        "error": str(err_text),
+                    }
+        except asyncio.TimeoutError:
+            logger.error("Pipeline sync TIMEOUT — Server did not respond in 10s. Data is safe locally.")
+            self._last_sync_ok = False
+            self._last_sync_detail = {"error": "timeout"}
+            return {**base, "pipeline_sync": "failed", "error": "timeout"}
+        except Exception as e:
+            logger.exception("Pipeline sync trigger error — data is safe locally.")
+            self._last_sync_ok = False
+            self._last_sync_detail = {"error": str(e)}
+            return {**base, "pipeline_sync": "failed", "error": str(e)}
+
+    async def _check_pipeline_config(self) -> None:
+        """Non-blocking config check — prints guided CLI hints.
+
+        Called on startup and after affirm=true.  Never blocks, never raises.
+        """
+        if not self.server_available:
+            return
+        try:
+            async with self.session.get(
+                f"{self.server_url}/api/dataset/config_status",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status != 200:
+                    return
+                status = await resp.json()
+                if status.get("ok"):
+                    return
+
+                mode = status.get("mode", "unknown")
+                missing = status.get("missing", [])
+                hints = status.get("hints", [])
+
+                logger.warning(
+                    "Pipeline config INCOMPLETE (mode=%s). "
+                    "Recording works normally — data stays on local disk. "
+                    "Missing: %s",
+                    mode, ", ".join(missing) if missing else "see hints",
+                )
+                for hint in hints:
+                    logger.warning("  Hint: %s", hint)
+        except Exception:
+            pass
+
+    def _get_lite_collection_root(self) -> Path:
+        try:
+            from robodriver_robot_deepcybo_lite_aio_ros2.config import (
+                DEFAULT_DATA_ROOT,
+            )
+        except Exception:
+            DEFAULT_DATA_ROOT = DOROBOT_DATASET
+
+        return resolve_lite_collection_root(DEFAULT_DATA_ROOT)
+
+    def _prepare_lite_collection_root(self, root: Path) -> bool:
+        root = root.expanduser()
+        if str(root).startswith("/media/") and not root.exists():
+            logger.error(
+                f"Lite collection root does not exist, refusing to create mount path: {root}"
+            )
+            return False
+
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            total, used, free = shutil.disk_usage(root)
+        except Exception as e:
+            logger.error(f"Cannot access Lite collection root {root}: {e}")
+            return False
+
+        free_gb = free // (2**30)
+        if free_gb < 2:
+            logger.warning(
+                f"Lite collection root free space is below 2GB: {root}, free={free_gb}GB"
+            )
+            return False
+        return True
+
+    def _build_lite_ros2_record_cmd(self) -> dict:
+        self.ros2_collection_sequence += 1
+        return build_lite_ros2_record_cmd(
+            sequence=self.ros2_collection_sequence,
+            robot_name=getattr(self.daemon.robot, "name", "deepcybo-lite-aio-ros2"),
+        )
+
+    def _ensure_unique_ros2_record_dir(
+        self, dataset_path: Path, msg: dict
+    ) -> tuple[str, Path]:
+        repo_id, target_dir, unique_msg = ensure_unique_ros2_record_dir(
+            dataset_path, msg
+        )
+        msg.update(unique_msg)
+        return repo_id, target_dir
+
+    async def _wait_for_daemon_record_frame(self) -> bool:
+        timeout_s = get_lite_record_ready_timeout()
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if (
+                self.daemon.get_observation() is not None
+                and self.daemon.get_obs_action() is not None
+            ):
+                return True
+            await asyncio.sleep(0.05)
+        logger.error(
+            "Timed out waiting for daemon observation/action before ROS2 collection."
+        )
+        return False
+
+    async def handle_ros2_start_collect(self, value: bool) -> dict:
+        if not value:
+            logger.info("ROS2 start_collect=false received, latch cleared.")
+            return self._collection_result("ignored_false")
+        return await self.start_collection_from_ros2()
+
+    async def handle_ros2_finish_collect(self, value: bool) -> dict:
+        if not value:
+            logger.info("ROS2 finish_collect=false received, latch cleared.")
+            return self._collection_result("ignored_false")
+        return await self.finish_collection_from_ros2()
+
+    async def handle_ros2_affirm_to_collect(self, value: bool) -> dict:
+        return await self.affirm_collection_from_ros2(keep=value)
+
+    async def start_collection_from_ros2(self) -> dict:
+        async with self._collection_lock:
+            logger.info("处理 ROS2 开始采集命令...")
+            if self.replaying:
+                logger.warning("Replay is running, cannot start ROS2 collection.")
+                return self._collection_result("replay_in_progress")
+
+            if self.collection_state == CollectionState.COLLECTING:
+                logger.info("ROS2 collection is already active, ignoring duplicate start.")
+                return self._collection_result("already_collecting")
+
+            if self.collection_state == CollectionState.WAITING_AFFIRM:
+                logger.warning("Pending episode needs affirmation before next start.")
+                return self._collection_result("pending_affirmation")
+
+            if self.recording:
+                logger.warning(
+                    "A collection is already active outside ROS2, refusing ROS2 start."
+                )
+                return self._collection_result("recording_in_progress")
+
+            dataset_path = self._get_lite_collection_root()
+            if not self._prepare_lite_collection_root(dataset_path):
+                return self._collection_result("storage_unavailable")
+
+            if not await self._wait_for_daemon_record_frame():
+                return self._collection_result("daemon_not_ready")
+
+            msg = self._build_lite_ros2_record_cmd()
+            repo_id, target_dir = self._ensure_unique_ros2_record_dir(
+                dataset_path, msg
+            )
+            task_name = msg.get("task_name")
+            record_cfg = RecordConfig(
+                fps=DEFAULT_FPS,
+                single_task=task_name,
+                repo_id=repo_id,
+                video=self.daemon.robot.use_videos,
+                resume=False,
+                root=target_dir,
+            )
+            self.record = Record(
+                fps=DEFAULT_FPS,
+                robot=self.daemon.robot,
+                daemon=self.daemon,
+                teleop=self.teleop,
+                record_cfg=record_cfg,
+                record_cmd=msg,
+            )
+            self.recording = True
+            self.pending_episode_index = None
+            self.pending_save_data = None
+            self.pending_record_cmd = None
+            self._set_collection_state(CollectionState.COLLECTING)
+            self.record.start()
+
+            logger.info(f"ROS2 collection started: repo_id={repo_id}, root={target_dir}")
+            return self._collection_result(
+                "success",
+                {
+                    "record_cmd": msg,
+                    "repo_id": repo_id,
+                    "root": str(target_dir),
+                },
+            )
+
+    async def finish_collection_from_ros2(self) -> dict:
+        async with self._collection_lock:
+            logger.info("处理 ROS2 完成采集命令...")
+            if self.replaying:
+                logger.warning("Replay is running, cannot finish ROS2 collection.")
+                return self._collection_result("replay_in_progress")
+
+            if self.collection_state == CollectionState.IDLE and not self.recording:
+                logger.info("No active ROS2 collection, ignoring stale finish.")
+                return self._collection_result("no_active_recording")
+
+            if self.collection_state == CollectionState.WAITING_AFFIRM:
+                logger.info("ROS2 collection already saved, ignoring duplicate finish.")
+                return self._collection_result("already_waiting_affirmation")
+
+            if self.record is None:
+                logger.error("ROS2 finish requested but no Record exists.")
+                self.recording = False
+                self._set_collection_state(CollectionState.ERROR)
+                return self._collection_result("missing_record")
+
+            self.saveing = True
+            self._set_collection_state(CollectionState.SAVING)
+            try:
+                self.record.stop()
+                save_data = await asyncio.to_thread(self.record.save)
+                if save_data is None:
+                    save_data = self.record.save_data
+
+                self.recording = False
+                self.pending_episode_index = self.record.last_record_episode_index
+                self.pending_save_data = save_data
+                self.pending_record_cmd = self.record.record_cmd
+                self._set_collection_state(CollectionState.WAITING_AFFIRM)
+
+                logger.info(
+                    f"ROS2 collection saved and waiting affirmation: episode={self.pending_episode_index}"
+                )
+                return self._collection_result("success", save_data)
+            except Exception as e:
+                logger.exception(f"Failed to finish ROS2 collection: {e}")
+                self.recording = False
+                self._set_collection_state(CollectionState.ERROR)
+                return self._collection_result("save_failed", {"error": str(e)})
+            finally:
+                self.saveing = False
+
+    async def affirm_collection_from_ros2(self, keep: bool) -> dict:
+        async with self._collection_lock:
+            logger.info(f"处理 ROS2 采集确认命令: keep={keep}")
+            if self.collection_state != CollectionState.WAITING_AFFIRM:
+                logger.info("No pending ROS2 collection, ignoring stale affirmation.")
+                return self._collection_result("no_pending_recording")
+
+            if self.record is None:
+                logger.error("ROS2 affirmation requested but no Record exists.")
+                self._set_collection_state(CollectionState.ERROR)
+                return self._collection_result("missing_record")
+
+            data = self.pending_save_data
+            if keep:
+                logger.info(
+                    "ROS2 collection kept: episode=%s", self.pending_episode_index
+                )
+
+                # Extract path info for pipeline sync trigger
+                _src = (
+                    data.get("file_message", {}).get("file_local_path", "")
+                    if isinstance(data, dict) else ""
+                )
+                _name = (
+                    data.get("file_message", {}).get("file_name", "")
+                    if isinstance(data, dict) else ""
+                )
+
+                self.pending_episode_index = None
+                self.pending_save_data = None
+                self.pending_record_cmd = None
+                self.record = None
+                self._set_collection_state(CollectionState.IDLE)
+
+                # Fire pipeline sync in background; capture result for inspection
+                _sync_result = {"pipeline_sync": "not_triggered"}
+                if _src and _name:
+                    _sync_task = asyncio.create_task(
+                        self._trigger_pipeline_sync(_src, _name)
+                    )
+                    # Don't await — keep ROS2 FSM non-blocking.
+                    # The task will log its own outcome and update _last_sync_*.
+                    _sync_result = {"pipeline_sync": "triggered"}
+
+                    # Non-blocking config check for next-time guidance
+                    asyncio.create_task(self._check_pipeline_config())
+
+                return self._collection_result("success", {
+                    **(data or {}),
+                    **_sync_result,
+                })
+
+            self._set_collection_state(CollectionState.DISCARDING)
+            try:
+                self.record.discard()
+                logger.info("ROS2 collection discarded.")
+                self.pending_episode_index = None
+                self.pending_save_data = None
+                self.pending_record_cmd = None
+                self.record = None
+                self._set_collection_state(CollectionState.IDLE)
+                return self._collection_result("discarded", data)
+            except Exception as e:
+                logger.exception(f"Failed to discard ROS2 collection: {e}")
+                self._set_collection_state(CollectionState.ERROR)
+                return self._collection_result("discard_failed", {"error": str(e)})
 
     async def __on_robot_command_handle(self, data):
         """收到机器人命令回调"""
@@ -418,6 +823,9 @@ class Coordinator:
         return sum(self.cameras.values())
 
     async def update_stream_info_to_server(self):
+        if not self.server_available:
+            logger.debug("Server is unavailable, skip stream info update.")
+            return
         stream_info_data = cameras_to_stream_json(self.cameras)
         logger.info(f"stream_info_data: {stream_info_data}")
         try:
@@ -435,6 +843,8 @@ class Coordinator:
             logger.error(f"同步流信息异常: {e}")
 
     async def update_stream_async(self, name, frame):
+        if not self.server_available:
+            return
         _, jpeg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         url = f"{self.server_url}/robot/update_stream/{self.cameras[name]}"
         try:

@@ -273,6 +273,7 @@ class Record:
         self.last_record_episode_index = episode_index
 
         self.save_data = data
+        return data
 
     def discard(self):
         if self.record_complete == True:

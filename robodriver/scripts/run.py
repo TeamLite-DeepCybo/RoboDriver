@@ -67,7 +67,14 @@ async def async_main(cfg: ControlPipelineConfig):
     monitor.start()
 
     coordinator = Coordinator(daemon, teleop)
-    await coordinator.start()
+    try:
+        await coordinator.start()
+    except Exception as e:
+        if cfg.robot.type != "deepcybo-lite-aio-ros2":
+            raise
+        logger.warning(
+            f"RoboDriver-Server unavailable, continuing Lite ROS2 collection offline: {e}"
+        )
 
     coordinator.stream_info(daemon.cameras_info)
     if sim is not None:
@@ -76,6 +83,13 @@ async def async_main(cfg: ControlPipelineConfig):
 
     if "ros2" in cfg.robot.type:
         ros2_manager.add_node(daemon.robot.get_node())
+        if cfg.robot.type == "deepcybo-lite-aio-ros2":
+            from robodriver.core.ros2_collection_bridge import Ros2CollectionBridge
+
+            collection_bridge = Ros2CollectionBridge(
+                coordinator, asyncio.get_running_loop()
+            )
+            ros2_manager.add_node(collection_bridge)
     if (cfg.teleop is not None and "ros2" in cfg.teleop.type):
         ros2_manager.add_node(teleop.get_node())
     if "ros2" in cfg.robot.type or (cfg.teleop is not None and "ros2" in cfg.teleop.type):

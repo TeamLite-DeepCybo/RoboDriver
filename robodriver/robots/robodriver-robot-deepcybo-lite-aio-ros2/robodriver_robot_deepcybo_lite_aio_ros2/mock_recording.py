@@ -1,8 +1,8 @@
 """ROS2 mock inputs for DeepCybo Lite RoboDriver recording smoke tests.
 
-This node is intentionally small and boring: it publishes deterministic arm
-motion on the BAR Lite topics and mirrors one USB camera compressed stream to
-the three camera topics expected by the RoboDriver package.
+This node is intentionally small and boring: it publishes deterministic arm and
+gripper motion on the BAR Lite topics and mirrors one USB camera compressed
+stream to the three camera topics expected by the RoboDriver package.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from sensor_msgs.msg import CompressedImage, JointState
 
 from bar_msgs.msg import MITCommand
 
-from .config import ARM_JOINT_NAMES, DeepcyboLiteRos2Topics
+from .config import ARM_JOINT_NAMES, LITE_JOINT_NAMES, DeepcyboLiteRos2Topics
 
 
 def _reliable_qos(depth: int = 10) -> QoSProfile:
@@ -42,7 +42,7 @@ def _best_effort_qos(depth: int = 10) -> QoSProfile:
 
 
 class DeepcyboLiteMockRecordingNode(Node):
-    """Publish arm mock data and bridge a single camera to three topics."""
+    """Publish arm/gripper mock data and bridge a single camera to three topics."""
 
     def __init__(
         self,
@@ -120,6 +120,12 @@ class DeepcyboLiteMockRecordingNode(Node):
             slow = math.sin(2.0 * math.pi * 0.13 * t + phase)
             fast = 0.25 * math.sin(2.0 * math.pi * 0.43 * t + phase * 0.5)
             values.append(self.motion_scale * (slow + fast))
+
+        left_gripper = 0.5 + 0.5 * math.sin(2.0 * math.pi * 0.11 * t + phase_shift)
+        right_gripper = 0.5 + 0.5 * math.sin(
+            2.0 * math.pi * 0.11 * t + phase_shift + 0.7
+        )
+        values.extend([left_gripper, right_gripper])
         return values
 
     def _publish_arm_messages(self) -> None:
@@ -129,20 +135,20 @@ class DeepcyboLiteMockRecordingNode(Node):
 
         joint_state = JointState()
         joint_state.header.stamp = stamp
-        joint_state.name = list(ARM_JOINT_NAMES)
+        joint_state.name = list(LITE_JOINT_NAMES)
         joint_state.position = follower_position
-        joint_state.velocity = [0.0] * len(ARM_JOINT_NAMES)
-        joint_state.effort = [0.0] * len(ARM_JOINT_NAMES)
+        joint_state.velocity = [0.0] * len(LITE_JOINT_NAMES)
+        joint_state.effort = [0.0] * len(LITE_JOINT_NAMES)
         self._joint_pub.publish(joint_state)
 
         command = MITCommand()
         command.header.stamp = stamp
-        command.joint_names = list(ARM_JOINT_NAMES)
+        command.joint_names = list(LITE_JOINT_NAMES)
         command.position = leader_position
-        command.velocity = [0.0] * len(ARM_JOINT_NAMES)
-        command.effort = [0.0] * len(ARM_JOINT_NAMES)
-        command.stiffness = [self.command_stiffness] * len(ARM_JOINT_NAMES)
-        command.damping = [self.command_damping] * len(ARM_JOINT_NAMES)
+        command.velocity = [0.0] * len(LITE_JOINT_NAMES)
+        command.effort = [0.0] * len(LITE_JOINT_NAMES)
+        command.stiffness = [self.command_stiffness] * len(LITE_JOINT_NAMES)
+        command.damping = [self.command_damping] * len(LITE_JOINT_NAMES)
         self._command_pub.publish(command)
 
         self._tick += 1
@@ -200,7 +206,7 @@ def _make_topics_from_args(args: argparse.Namespace) -> DeepcyboLiteRos2Topics:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Publish DeepCybo Lite mock arm messages and bridge one compressed "
+            "Publish DeepCybo Lite mock arm/gripper messages and bridge one compressed "
             "USB camera stream to the three RoboDriver camera topics."
         )
     )

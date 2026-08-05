@@ -1,9 +1,9 @@
 """DeepCybo Lite — ROS2 订阅 / 同步 / 拼向量 / 回放发布。
 
-机械臂向量布局（14 维，与 bar_bringup_lite/config/lite_hardware.yaml 一致）::
-    left arm 7 | right arm 7
+机械臂/夹爪向量布局（16 维）::
+    left arm 7 | right arm 7 | left gripper | right gripper
 
-机械臂话题::
+机械臂/夹爪话题::
     observation: sensor_msgs/JointState @ /slave/lite/joint_states
     action:      bar_msgs/MITCommand   @ /slave/remote_policy_controller/command
 
@@ -27,7 +27,7 @@ from geometry_msgs.msg import PoseStamped  # noqa: F401
 
 import logging_mp
 
-from .config import ARM_JOINT_NAMES, DeepcyboLiteRos2Topics
+from .config import LITE_JOINT_NAMES, DeepcyboLiteRos2Topics
 
 try:
     from bar_msgs.msg import MITCommand
@@ -38,7 +38,7 @@ else:
     _BAR_MSGS_IMPORT_ERROR = None
 
 CONNECT_TIMEOUT_FRAME = 10
-STATE_DIM = len(ARM_JOINT_NAMES)  # 14
+STATE_DIM = len(LITE_JOINT_NAMES)  # 16
 
 # 解码尺寸（与 Lite包使用说明 / 中台出图一致）
 CAMERA_WIDTH = 640
@@ -48,7 +48,7 @@ logger = logging_mp.get_logger(__name__)
 
 
 class JointVectorError(Exception):
-    """机械臂消息无法转换为 canonical 14 维向量。"""
+    """机械臂/夹爪消息无法转换为 canonical 16 维向量。"""
 
 
 # 兼容旧文档 / 排障脚本里引用的异常名
@@ -137,7 +137,7 @@ class DeepcyboLiteAioRos2RobotNode(ROS2Node):
         )
 
     # ------------------------------------------------------------------
-    # 机械臂消息 -> canonical 14 维向量
+    # 机械臂/夹爪消息 -> canonical 16 维向量
     # ------------------------------------------------------------------
     @staticmethod
     def _vector_from_joint_state(msg: JointState, label: str) -> np.ndarray:
@@ -151,14 +151,14 @@ class DeepcyboLiteAioRos2RobotNode(ROS2Node):
             name: float(pos)
             for name, pos in zip(msg.name, msg.position, strict=False)
         }
-        missing = [name for name in ARM_JOINT_NAMES if name not in position_by_name]
+        missing = [name for name in LITE_JOINT_NAMES if name not in position_by_name]
         if missing:
             raise JointVectorError(
-                f"{label}: JointState 缺少 canonical arm joints: {missing}；本帧丢弃"
+                f"{label}: JointState 缺少 canonical Lite joints: {missing}；本帧丢弃"
             )
 
         return np.asarray(
-            [position_by_name[name] for name in ARM_JOINT_NAMES],
+            [position_by_name[name] for name in LITE_JOINT_NAMES],
             dtype=np.float32,
         )
 
@@ -174,14 +174,14 @@ class DeepcyboLiteAioRos2RobotNode(ROS2Node):
             name: float(pos)
             for name, pos in zip(msg.joint_names, msg.position, strict=False)
         }
-        missing = [name for name in ARM_JOINT_NAMES if name not in position_by_name]
+        missing = [name for name in LITE_JOINT_NAMES if name not in position_by_name]
         if missing:
             raise JointVectorError(
-                f"{label}: MITCommand 缺少 canonical arm joints: {missing}；本帧丢弃"
+                f"{label}: MITCommand 缺少 canonical Lite joints: {missing}；本帧丢弃"
             )
 
         return np.asarray(
-            [position_by_name[name] for name in ARM_JOINT_NAMES],
+            [position_by_name[name] for name in LITE_JOINT_NAMES],
             dtype=np.float32,
         )
 
@@ -326,7 +326,7 @@ class DeepcyboLiteAioRos2RobotNode(ROS2Node):
             n = STATE_DIM
             msg = MITCommand()
             msg.header.stamp = self.get_clock().now().to_msg()
-            msg.joint_names = list(ARM_JOINT_NAMES)
+            msg.joint_names = list(LITE_JOINT_NAMES)
             msg.position = [norm(v) for v in vec]
             msg.velocity = [0.0] * n
             msg.effort = [0.0] * n

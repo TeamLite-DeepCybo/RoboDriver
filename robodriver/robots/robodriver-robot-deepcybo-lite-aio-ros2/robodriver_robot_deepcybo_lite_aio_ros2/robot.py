@@ -142,14 +142,14 @@ class DeepcyboLiteAioRos2Robot(Robot):
                 if not leader_ok:
                     parts.append(
                         f"等待 action(leader) 超时: 需要缓存键 '{LEADER_COMP}' "
-                        f"且 {STATE_DIM} 维 canonical arm-joint 向量; "
+                        f"且 {STATE_DIM} 维 canonical Lite 向量; "
                         f"当前 leader_ok={self.robot_ros2_node._leader_arm_ok}, "
                         f"keys={list(self.robot_ros2_node.recv_leader.keys())}"
                     )
                 if not follower_ok:
                     parts.append(
                         f"等待 observation(follower) 超时: 需要缓存键 '{FOLLOWER_COMP}' "
-                        f"且 {STATE_DIM} 维 canonical arm-joint 向量; "
+                        f"且 {STATE_DIM} 维 canonical Lite 向量; "
                         f"当前 follower_ok={self.robot_ros2_node._follower_arm_ok}, "
                         f"keys={list(self.robot_ros2_node.recv_follower.keys())}"
                     )
@@ -191,7 +191,7 @@ class DeepcyboLiteAioRos2Robot(Robot):
             raise DeviceNotConnectedError(f"{self} is not connected.")
         if not self._has_valid_follower_vector():
             raise DeviceNotConnectedError(
-                f"{self}: follower 关节数据无效或 canonical 14 维未恢复，本帧不采集 observation"
+                f"{self}: follower 关节/夹爪数据无效或 canonical {STATE_DIM} 维未恢复，本帧不采集 observation"
             )
 
         obs_dict: dict[str, Any] = {}
@@ -213,7 +213,7 @@ class DeepcyboLiteAioRos2Robot(Robot):
             raise DeviceNotConnectedError(f"{self} is not connected.")
         if not self._has_valid_leader_vector():
             raise DeviceNotConnectedError(
-                f"{self}: leader 关节数据无效或 canonical 14 维未恢复，本帧不采集 action"
+                f"{self}: leader 关节/夹爪数据无效或 canonical {STATE_DIM} 维未恢复，本帧不采集 action"
             )
 
         act_dict: dict[str, Any] = {}
