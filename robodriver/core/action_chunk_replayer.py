@@ -25,6 +25,7 @@ import numpy as np
 import logging_mp
 from lerobot.robots import Robot
 
+from . import units_patch
 from robodriver.robots.utils import busy_wait
 from .inference_client import ACTION_DIM, ROBOT_ACTION_DIM, server_action_to_robot
 
@@ -63,9 +64,12 @@ class ActionChunkPublisher:
         replayer.stop()
     """
 
-    def __init__(self, robot: Robot, fps: int = 30):
+    def __init__(self, robot: Robot, fps: int = 30, norm2si: bool = True):
         self.robot = robot
         self.fps = max(1, int(fps))
+        # TEMP 归一化补丁：True = 当前模型按夹爪归一化(0..1)训练，action
+        # 需转米制后下发；SI 数据集重训后置 False 并移除补丁。
+        self.norm2si = bool(norm2si)
         self._frame_interval_s = 1.0 / self.fps
 
         # ---- 线程状态 ----
@@ -238,8 +242,7 @@ class ActionChunkPublisher:
 
     # 向量格式转换：128 维 → leader 命名 dict
     # ------------------------------------------------------------------
-    @classmethod
-    def _action_vector_to_dict(cls, vec_128: np.ndarray) -> Dict[str, float]:
+    def _action_vector_to_dict(self, vec_128: np.ndarray) -> Dict[str, float]:
         """128 维 action 向量 → robot.send_action() 所需的命名 dict。
 
         流程：
@@ -247,7 +250,10 @@ class ActionChunkPublisher:
           2. 映射为 {"leader_<joint_name>.pos": float, ...}
         """
         vec_16 = server_action_to_robot(vec_128)
+        if self.norm2si:
+            # TEMP 归一化补丁：夹爪 0..1 -> 米制（机器人 SI 量纲）。
+            vec_16 = units_patch.normalized_to_si(vec_16)
         return {
             f"leader_{name}.pos": float(vec_16[i])
-            for i, name in enumerate(cls._LITE_JOINT_NAMES)
+            for i, name in enumerate(self._LITE_JOINT_NAMES)
         }

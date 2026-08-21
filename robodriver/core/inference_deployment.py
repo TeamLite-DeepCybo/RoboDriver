@@ -22,6 +22,7 @@ import numpy as np
 import logging_mp
 from lerobot.robots import Robot
 
+from . import units_patch
 from .action_chunk_replayer import ActionChunkPublisher
 from .inference_client import (
     ACTION_DIM,
@@ -58,15 +59,19 @@ class InferenceDeploymentLoop:
         chunk_size: int = 50,
         prompt: str = "",
         debug_state: bool = False,
+        norm2si: bool = True,
     ):
         self.robot = robot
         self.fps = max(1, int(fps))
         self.chunk_size = max(1, int(chunk_size))
         self.prompt = prompt
         self.debug_state = debug_state
+        # TEMP 归一化补丁：True = 当前模型按夹爪归一化(0..1)训练，部署时
+        # 观测转 0..1、action 转米；SI 数据集重训后置 False 并移除补丁。
+        self.norm2si = bool(norm2si)
 
         self.client = InferenceClient(server_url)
-        self.publisher = ActionChunkPublisher(robot, fps=fps)
+        self.publisher = ActionChunkPublisher(robot, fps=fps, norm2si=norm2si)
 
         self._running = False
         self._request_counter: int = 0
@@ -219,6 +224,9 @@ class InferenceDeploymentLoop:
             [float(obs.get(f"follower_{name}.pos", 0.0)) for name in _NAMES],
             dtype=np.float32,
         )
+        if self.norm2si:
+            # TEMP 归一化补丁：夹爪米制 -> 0..1（模型训练量纲）。
+            state = units_patch.si_to_normalized(state)
 
         images: Dict[str, np.ndarray] = {}
         for cam_name in ("image_head", "image_wrist_left", "image_wrist_right"):

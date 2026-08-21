@@ -41,6 +41,7 @@ async def _run_inference_loop(
     fps: int,
     chunk_size: int,
     debug_state: bool = False,
+    norm2si: bool = True,
     spin_thread=None,
 ) -> None:
     """REMOTE_POLICY 阶段的推理主循环：持续请求 chunk 并回放。
@@ -57,6 +58,7 @@ async def _run_inference_loop(
         chunk_size=chunk_size,
         prompt=prompt,
         debug_state=debug_state,
+        norm2si=norm2si,
     )
 
     # 复用 InferenceDeploymentLoop 的主循环逻辑
@@ -85,7 +87,14 @@ async def _run_inference_loop(
     )
 
 
-async def main(server_url: str, prompt: str, fps: int, chunk_size: int, auto_mode: bool = False) -> None:
+async def main(
+    server_url: str,
+    prompt: str,
+    fps: int,
+    chunk_size: int,
+    auto_mode: bool = False,
+    norm2si: bool = True,
+) -> None:
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     executor = MultiThreadedExecutor()
 
@@ -147,6 +156,7 @@ async def main(server_url: str, prompt: str, fps: int, chunk_size: int, auto_mod
                 await _run_inference_loop(
                     robot, server_url, prompt, fps, chunk_size,
                     debug_state=args.debug_state,
+                    norm2si=norm2si,
                     spin_thread=spin_thread,
                 )
             except KeyboardInterrupt:
@@ -209,13 +219,33 @@ if __name__ == '__main__':
         action='store_true',
         help='调试模式：每次收到 joint_states 时打印前 3 个关节值',
     )
+    parser.add_argument(
+        '--no-norm2si',
+        action='store_true',
+        help='关闭临时夹爪归一化补丁（仅当模型已按 SI 米制训练时使用）',
+    )
     args = parser.parse_args()
 
     fps = 10 if args.test else args.fps
     if args.test:
         print(f'[测试模式] 控制频率: {fps}Hz (正常频率的 1/3)')
+    norm2si = not args.no_norm2si
+    if norm2si:
+        print(
+            '[TEMP 归一化补丁] 夹爪 0..1 <-> 米制换算已启用；'
+            'SI 数据集重训后请用 --no-norm2si 关闭并移除补丁'
+        )
     try:
-        asyncio.run(main(args.server_url, args.prompt, fps, args.chunk_size, args.auto))
+        asyncio.run(
+            main(
+                args.server_url,
+                args.prompt,
+                fps,
+                args.chunk_size,
+                args.auto,
+                norm2si,
+            )
+        )
     except KeyboardInterrupt:
         print('\n用户中断。')
     except TimeoutError as e:
