@@ -5,6 +5,7 @@ from typing import List
 
 import cv2
 import logging_mp
+logging_mp.basicConfig(level=logging_mp.INFO)
 from lerobot.robots import RobotConfig
 from lerobot.teleoperators import TeleoperatorConfig
 
@@ -24,7 +25,6 @@ from robodriver.utils.utils import git_branch_log
 
 # from lerobot.teleoperators import make_teleoperator_from_config
 
-logging_mp.basicConfig(level=logging_mp.INFO)
 logger = logging_mp.getLogger(__name__)
 
 

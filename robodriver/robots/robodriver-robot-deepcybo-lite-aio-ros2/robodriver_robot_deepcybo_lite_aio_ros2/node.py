@@ -84,7 +84,7 @@ class DeepcyboLiteAioRos2RobotNode(ROS2Node):
         self._cmd_cb_skipped = 0
 
         self.qos = QoSProfile(
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            durability=DurabilityPolicy.VOLATILE,
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=10,
