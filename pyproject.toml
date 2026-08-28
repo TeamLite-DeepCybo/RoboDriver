@@ -17,7 +17,11 @@ dependencies = [
     # "genesis-world",
     "mujoco",
 
-    "logging_mp==0.1.5",
+    # R15/issue #7：代码使用 0.2.x getLogger API，声明与实现一致（原 ==0.1.5 与代码矛盾）
+    "logging_mp>=0.2.0,<0.3",
+    # issue #7：显式声明运行时依赖（generate-parameter-library / 数据后处理需要）
+    "tyro>=0.9.0",
+    "typeguard>=4.0",
     "python-socketio",
 
     "sounddevice",
