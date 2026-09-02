@@ -124,8 +124,14 @@ def main() -> int:
     parser.add_argument(
         "--gripper-max-m",
         type=float,
-        default=0.047,
-        help="归一化 1.0 对应的米制行程（默认 0.047）",
+        default=None,
+        help="归一化 1.0 对应的米制行程。缺省时从 --urdf / 默认 lite_urdf 读取（单一来源）。",
+    )
+    parser.add_argument(
+        "--urdf",
+        type=str,
+        default="",
+        help="lite_urdf（或展开后 URDF）文件路径，用于读取夹爪上限（单一来源）。",
     )
     parser.add_argument(
         "--force", action="store_true", help="输出目录已存在时覆盖"
@@ -135,6 +141,17 @@ def main() -> int:
     src: Path = args.input_dir
     dst: Path = args.output_dir
     scale = args.gripper_max_m
+    if scale is None:
+        # 单一来源：从 URDF 读夹爪 prismatic 上限；读不到时退回默认 0.047（与 lite_urdf 一致）。
+        from robodriver.core.gripper_limits import (
+            read_gripper_limits_from_path,
+            DEFAULT_GRIPPER_MAX_M,
+        )
+        if args.urdf:
+            _, scale = read_gripper_limits_from_path(args.urdf)
+        else:
+            scale = DEFAULT_GRIPPER_MAX_M
+        print(f"[gripper-max-m] 从{'URDF ' + args.urdf if args.urdf else '默认'}读取: {scale}")
     if scale <= 0:
         print(f"错误：--gripper-max-m 必须为正数，got {scale}", file=sys.stderr)
         return 2
