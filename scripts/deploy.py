@@ -42,11 +42,18 @@ async def _run_inference_loop(
     chunk_size: int,
     debug_state: bool = False,
     norm2si: bool = True,
+    gripper_max_m: float = 0.047,
     spin_thread=None,
 ) -> None:
     """REMOTE_POLICY 阶段的推理主循环：持续请求 chunk 并回放。
 
     退出条件：Ctrl+C 或连续推理失败超阈值。
+
+    关于 gripper_max_m（单一来源，详见 units_patch / gripper_limits 模块注释）：
+    本阶段当前只做"模型归一化夹爪 -> 机器人 SI 米制"的临时反归一化。但从长期看，
+    端侧客户端（部署闭环链路上）可能还会嵌入模型输出合法性检测与修整（例如把越界
+    的夹爪 action 修整到合法开度）。这些校验/修整都应使用同一份夹爪开度上限，即
+    URDF `<limit upper>` 的单一来源，而不是散落的 magic number。
     """
     from robodriver.core.inference_client import InferenceClient
     from robodriver.core.inference_deployment import InferenceDeploymentLoop
@@ -59,6 +66,7 @@ async def _run_inference_loop(
         prompt=prompt,
         debug_state=debug_state,
         norm2si=norm2si,
+        gripper_max_m=gripper_max_m,
     )
 
     # 复用 InferenceDeploymentLoop 的主循环逻辑
@@ -94,6 +102,7 @@ async def main(
     chunk_size: int,
     auto_mode: bool = False,
     norm2si: bool = True,
+    gripper_max_m: float = 0.047,
 ) -> None:
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     executor = MultiThreadedExecutor()
@@ -157,6 +166,7 @@ async def main(
                     robot, server_url, prompt, fps, chunk_size,
                     debug_state=args.debug_state,
                     norm2si=norm2si,
+                    gripper_max_m=gripper_max_m,
                     spin_thread=spin_thread,
                 )
             except KeyboardInterrupt:
@@ -220,6 +230,18 @@ if __name__ == '__main__':
         help='调试模式：每次收到 joint_states 时打印前 3 个关节值',
     )
     parser.add_argument(
+        '--gripper-max-m',
+        type=float,
+        default=None,
+        help='夹爪全开对应的 SI 米制上限。缺省时从 --urdf / 默认 lite_urdf 读取（单一来源）。',
+    )
+    parser.add_argument(
+        '--urdf',
+        type=str,
+        default='',
+        help='lite_urdf（或展开后 URDF）文件路径，用于读取夹爪上限（单一来源）。',
+    )
+    parser.add_argument(
         '--no-norm2si',
         action='store_true',
         help='关闭临时夹爪归一化补丁（仅当模型已按 SI 米制训练时使用）',
@@ -230,6 +252,20 @@ if __name__ == '__main__':
     if args.test:
         print(f'[测试模式] 控制频率: {fps}Hz (正常频率的 1/3)')
     norm2si = not args.no_norm2si
+    # 夹爪上限单一来源：优先命令行，其次从 URDF 读，最后退回 0.047（与 lite_urdf 一致）。
+    # 说明：虽然当前仅做模型归一化夹爪->SI 的临时反归一化，但端侧客户端长期可能嵌入
+    # 模型输出合法性检测/修整，这些都应使用与 URDF 一致的夹爪开度上限，而非 magic number。
+    gripper_max_m = args.gripper_max_m
+    if gripper_max_m is None:
+        from robodriver.core.gripper_limits import (
+            read_gripper_limits_from_path,
+            DEFAULT_GRIPPER_MAX_M,
+        )
+        if args.urdf:
+            _, gripper_max_m = read_gripper_limits_from_path(args.urdf)
+        else:
+            gripper_max_m = DEFAULT_GRIPPER_MAX_M
+        print(f'[gripper-max-m] 从{"URDF " + args.urdf if args.urdf else "默认"}读取: {gripper_max_m}')
     if norm2si:
         print(
             '[TEMP 归一化补丁] 夹爪 0..1 <-> 米制换算已启用；'
@@ -244,6 +280,7 @@ if __name__ == '__main__':
                 args.chunk_size,
                 args.auto,
                 norm2si,
+                gripper_max_m,
             )
         )
     except KeyboardInterrupt:

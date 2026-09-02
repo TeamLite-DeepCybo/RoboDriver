@@ -1,4 +1,4 @@
-"""TEMPORARY units patch: normalized gripper opening (0..1) <-> SI meters.
+"""Temporary units patch: normalized gripper opening (0..1) <-> SI meters.
 
 背景：当前 PI05 模型（pi05_ft_deepcybo_lite_ep150_*）的训练数据是夹爪
 归一化开度（0..1）录制的；机器人在 lite_urdf SI 修复后，夹爪以米制
@@ -7,6 +7,16 @@
 本补丁在部署链路中做临时换算，让现有模型无需重训即可继续部署：
   - observation.state[14:16]（米）  -> 0..1 归一化（发送给推理服务端）
   - action[14:16]（0..1 归一化）    -> 米（下发机器人）
+
+设计说明（为什么夹爪开度上限要单一来源、并参数化传入）：
+  - 夹爪开度上限（0.047 = URDF <limit upper>，closed=0 / positive=open）此前
+    散落在多处硬编码。这里统一以 URDF 为单一来源，各消费方从 URDF 读取（见
+    robodriver.core.gripper_limits），避免 magic number 漂移。
+  - 当前这一步只是"模型归一化夹爪 -> 机器人 SI 米制"的临时反归一化。但长期看，
+    端侧客户端（部署闭环链路上）可能还会嵌入模型输出的合法性检测与修整（例如把
+    越界的夹爪 action 修整到合法开度）。这些校验/修整都应使用同一份 URDF 夹爪
+    上限；因此把 gripper_max_m 参数化并贯穿 deploy -> InferenceDeploymentLoop ->
+    ActionChunkPublisher，为后续端侧合法性检测/修整提供一致来源。
 
 TODO（后续统一修改 / unified change later）：训练数据已统一转换为 SI
 米制并重训后，移除本补丁，训练与部署全链路统一使用 SI 米制，不再需要
