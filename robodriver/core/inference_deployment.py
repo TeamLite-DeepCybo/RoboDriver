@@ -60,6 +60,7 @@ class InferenceDeploymentLoop:
         prompt: str = "",
         debug_state: bool = False,
         norm2si: bool = True,
+        gripper_max_m: float = units_patch.GRIPPER_MAX_POSITION_M,
     ):
         self.robot = robot
         self.fps = max(1, int(fps))
@@ -69,9 +70,12 @@ class InferenceDeploymentLoop:
         # TEMP 归一化补丁：True = 当前模型按夹爪归一化(0..1)训练，部署时
         # 观测转 0..1、action 转米；SI 数据集重训后置 False 并移除补丁。
         self.norm2si = bool(norm2si)
+        # 夹爪全开 SI 行程（URDF prismatic upper），单一来源；默认 0.047。
+        self.gripper_max_m = float(gripper_max_m)
 
         self.client = InferenceClient(server_url)
-        self.publisher = ActionChunkPublisher(robot, fps=fps, norm2si=norm2si)
+        self.publisher = ActionChunkPublisher(
+            robot, fps=fps, norm2si=norm2si, gripper_max_m=self.gripper_max_m)
 
         self._running = False
         self._request_counter: int = 0
@@ -225,8 +229,8 @@ class InferenceDeploymentLoop:
             dtype=np.float32,
         )
         if self.norm2si:
-            # TEMP 归一化补丁：夹爪米制 -> 0..1（模型训练量纲）。
-            state = units_patch.si_to_normalized(state)
+            # TEMP 归一化补丁：夹爪米制 -> 0..1（模型训练量纲），上限取 URDF 派生值。
+            state = units_patch.si_to_normalized(state, self.gripper_max_m)
 
         images: Dict[str, np.ndarray] = {}
         for cam_name in ("image_head", "image_wrist_left", "image_wrist_right"):

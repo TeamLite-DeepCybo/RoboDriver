@@ -64,12 +64,15 @@ class ActionChunkPublisher:
         replayer.stop()
     """
 
-    def __init__(self, robot: Robot, fps: int = 30, norm2si: bool = True):
+    def __init__(self, robot: Robot, fps: int = 30, norm2si: bool = True,
+                 gripper_max_m: float = units_patch.GRIPPER_MAX_POSITION_M):
         self.robot = robot
         self.fps = max(1, int(fps))
         # TEMP 归一化补丁：True = 当前模型按夹爪归一化(0..1)训练，action
         # 需转米制后下发；SI 数据集重训后置 False 并移除补丁。
         self.norm2si = bool(norm2si)
+        # 夹爪全开 SI 行程：单一来源 = URDF prismatic upper；默认 0.047。
+        self.gripper_max_m = float(gripper_max_m)
         self._frame_interval_s = 1.0 / self.fps
 
         # ---- 线程状态 ----
@@ -251,8 +254,8 @@ class ActionChunkPublisher:
         """
         vec_16 = server_action_to_robot(vec_128)
         if self.norm2si:
-            # TEMP 归一化补丁：夹爪 0..1 -> 米制（机器人 SI 量纲）。
-            vec_16 = units_patch.normalized_to_si(vec_16)
+            # TEMP 归一化补丁：夹爪 0..1 -> 米制（机器人 SI 量纲），上限取 URDF 派生值。
+            vec_16 = units_patch.normalized_to_si(vec_16, self.gripper_max_m)
         return {
             f"leader_{name}.pos": float(vec_16[i])
             for i, name in enumerate(self._LITE_JOINT_NAMES)

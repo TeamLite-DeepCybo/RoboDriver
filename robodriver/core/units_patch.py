@@ -19,27 +19,41 @@ import numpy as np
 
 # 夹爪通道在 canonical 16 维向量中的下标（左夹爪、右夹爪）。
 GRIPPER_INDICES = (14, 15)
-# 归一化开度 1.0 对应的 SI 米制行程（lite_urdf URDF prismatic upper limit）。
+# 归一化开度 1.0 对应的 SI 米制行程。单一来源 = lite_urdf URDF prismatic
+# limit upper=0.047（闭合=0、正方向=打开）。调用方应传入机器人从 URDF 派生
+# 的限位；此常量仅作为未拿到 URDF 时的默认值。
 GRIPPER_MAX_POSITION_M = 0.047
 
 
-def si_to_normalized(state: np.ndarray) -> np.ndarray:
-    """米制 -> 0..1 归一化（仅夹爪通道），用于按归一化数据训练的模型。"""
+def si_to_normalized(state: np.ndarray,
+                     gripper_max_m: float = GRIPPER_MAX_POSITION_M) -> np.ndarray:
+    """米制 -> 0..1 归一化（仅夹爪通道），用于按归一化数据训练的模型。
+
+    gripper_max_m：夹爪全开对应的 SI 行程（URDF prismatic upper），默认 0.047。
+    """
     vec = np.asarray(state, dtype=np.float32).copy()
+    if gripper_max_m <= 0.0:
+        return vec
     for idx in GRIPPER_INDICES:
         if idx < vec.shape[0]:
             vec[idx] = float(
-                np.clip(vec[idx] / GRIPPER_MAX_POSITION_M, 0.0, 1.0)
+                np.clip(vec[idx] / gripper_max_m, 0.0, 1.0)
             )
     return vec
 
 
-def normalized_to_si(action: np.ndarray) -> np.ndarray:
-    """0..1 归一化 -> 米制（仅夹爪通道），用于把模型 action 下发到机器人。"""
+def normalized_to_si(action: np.ndarray,
+                     gripper_max_m: float = GRIPPER_MAX_POSITION_M) -> np.ndarray:
+    """0..1 归一化 -> 米制（仅夹爪通道），用于把模型 action 下发到机器人。
+
+    gripper_max_m：夹爪全开对应的 SI 行程（URDF prismatic upper），默认 0.047。
+    """
     vec = np.asarray(action, dtype=np.float32).copy()
+    if gripper_max_m <= 0.0:
+        return vec
     for idx in GRIPPER_INDICES:
         if idx < vec.shape[0]:
             vec[idx] = float(
-                np.clip(vec[idx], 0.0, 1.0) * GRIPPER_MAX_POSITION_M
+                np.clip(vec[idx], 0.0, 1.0) * gripper_max_m
             )
     return vec
